@@ -544,4 +544,133 @@ class CpanelInstallerTest extends TestCase
             }
         }
     }
+
+    // ── 10. Procedural Installer HTTPS & Proxy Detection ─────────────────────
+
+    public function test_installer_https_detection_with_direct_https(): void
+    {
+        require_once base_path('install.php');
+
+        $this->assertTrue(installer_is_https(['HTTPS' => 'on']));
+        $this->assertTrue(installer_is_https(['HTTPS' => '1']));
+        $this->assertTrue(installer_is_https(['SERVER_PORT' => 443]));
+        $this->assertTrue(installer_is_https(['SERVER_PORT' => '443']));
+    }
+
+    public function test_installer_https_detection_with_plain_http(): void
+    {
+        require_once base_path('install.php');
+
+        $this->assertFalse(installer_is_https([]));
+        $this->assertFalse(installer_is_https(['SERVER_PORT' => 80]));
+        $this->assertFalse(installer_is_https(['HTTPS' => 'off', 'SERVER_PORT' => 80]));
+    }
+
+    public function test_installer_https_detection_rejects_spoofed_forwarded_headers_from_untrusted_ip(): void
+    {
+        require_once base_path('install.php');
+
+        $untrustedClient = ['REMOTE_ADDR' => '203.0.113.195', 'SERVER_PORT' => 80];
+
+        // Spoofed X-Forwarded-Proto
+        $this->assertFalse(installer_is_https($untrustedClient + ['HTTP_X_FORWARDED_PROTO' => 'https']));
+
+        // Spoofed X-Forwarded-Ssl
+        $this->assertFalse(installer_is_https($untrustedClient + ['HTTP_X_FORWARDED_SSL' => 'on']));
+
+        // Spoofed CF-Visitor
+        $this->assertFalse(installer_is_https($untrustedClient + [
+            'HTTP_CF_VISITOR' => '{"scheme":"https"}',
+            'HTTP_CF_RAY' => 'fake-ray-id-1234',
+        ]));
+    }
+
+    public function test_installer_https_detection_accepts_cloudflare_https_from_cloudflare_ip(): void
+    {
+        require_once base_path('install.php');
+
+        // Cloudflare IPv4 range 173.245.48.0/20
+        $cfServer = [
+            'REMOTE_ADDR' => '173.245.48.15',
+            'SERVER_PORT' => 80,
+            'HTTP_CF_VISITOR' => '{"scheme":"https"}',
+            'HTTP_CF_RAY' => '8e20abcd1234-BOM',
+        ];
+        $this->assertTrue(installer_is_https($cfServer));
+
+        // Cloudflare IPv6 range 2606:4700::/32
+        $cfServerIpv6 = [
+            'REMOTE_ADDR' => '2606:4700:10::5',
+            'SERVER_PORT' => 80,
+            'HTTP_CF_VISITOR' => '{"scheme":"https"}',
+            'HTTP_CF_RAY' => '8e20abcd1234-BOM',
+        ];
+        $this->assertTrue(installer_is_https($cfServerIpv6));
+
+        // Cloudflare HTTP (non-secure visitor)
+        $cfServerHttp = [
+            'REMOTE_ADDR' => '173.245.48.15',
+            'SERVER_PORT' => 80,
+            'HTTP_CF_VISITOR' => '{"scheme":"http"}',
+            'HTTP_CF_RAY' => '8e20abcd1234-BOM',
+        ];
+        $this->assertFalse(installer_is_https($cfServerHttp));
+    }
+
+    public function test_installer_https_detection_accepts_loopback_and_configured_trusted_proxies(): void
+    {
+        require_once base_path('install.php');
+
+        // Local loopback proxy (127.0.0.1)
+        $this->assertTrue(installer_is_https([
+            'REMOTE_ADDR' => '127.0.0.1',
+            'SERVER_PORT' => 80,
+            'HTTP_X_FORWARDED_PROTO' => 'https',
+        ]));
+        $this->assertTrue(installer_is_https([
+            'REMOTE_ADDR' => '127.0.0.1',
+            'SERVER_PORT' => 80,
+            'HTTP_X_FORWARDED_SSL' => 'on',
+        ]));
+        $this->assertFalse(installer_is_https([
+            'REMOTE_ADDR' => '127.0.0.1',
+            'SERVER_PORT' => 80,
+            'HTTP_X_FORWARDED_PROTO' => 'http',
+        ]));
+
+        // IPv6 loopback (::1)
+        $this->assertTrue(installer_is_https([
+            'REMOTE_ADDR' => '::1',
+            'SERVER_PORT' => 80,
+            'HTTP_X_FORWARDED_PROTO' => 'https',
+        ]));
+
+        // Configured trusted proxy via TRUSTED_PROXIES
+        $originalTrusted = getenv('TRUSTED_PROXIES');
+        putenv('TRUSTED_PROXIES=192.168.1.50,10.10.0.0/16');
+        try {
+            $this->assertTrue(installer_is_https([
+                'REMOTE_ADDR' => '192.168.1.50',
+                'SERVER_PORT' => 80,
+                'HTTP_X_FORWARDED_PROTO' => 'https',
+            ]));
+            $this->assertTrue(installer_is_https([
+                'REMOTE_ADDR' => '10.10.5.2',
+                'SERVER_PORT' => 80,
+                'HTTP_X_FORWARDED_SSL' => 'on',
+            ]));
+            // Non-matching private IP not in TRUSTED_PROXIES
+            $this->assertFalse(installer_is_https([
+                'REMOTE_ADDR' => '172.16.0.5',
+                'SERVER_PORT' => 80,
+                'HTTP_X_FORWARDED_PROTO' => 'https',
+            ]));
+        } finally {
+            if ($originalTrusted === false) {
+                putenv('TRUSTED_PROXIES');
+            } else {
+                putenv("TRUSTED_PROXIES={$originalTrusted}");
+            }
+        }
+    }
 }

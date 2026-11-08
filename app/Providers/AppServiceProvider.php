@@ -23,8 +23,13 @@ class AppServiceProvider extends ServiceProvider
     {
         // Never render detailed exception pages in production, even if an
         // environment file was accidentally deployed with APP_DEBUG=true.
+        // In production, force insecure webhooks and insecure redirects off.
         if ($this->app->isProduction()) {
-            config(['app.debug' => false]);
+            config([
+                'app.debug' => false,
+                'gateway.webhook_allow_insecure' => false,
+                'gateway.allow_insecure_redirects' => false,
+            ]);
             if (config('database.default') !== 'mysql') {
                 throw new RuntimeException('Production requires a MySQL database connection.');
             }

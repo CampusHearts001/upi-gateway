@@ -417,6 +417,11 @@ class InstallationManager
             ? $existingKey
             : 'base64:'.base64_encode(Encrypter::generateKey(config('app.cipher')));
 
+        $existingNodeId = $data['verification_node_id'] ?? $this->valueFromEnvironment($env, 'GATEWAY_VERIFICATION_NODE_ID');
+        $nodeId = $this->isPlaceholderNodeId($existingNodeId)
+            ? bin2hex(random_bytes(16))
+            : $existingNodeId;
+
         $replacements = [
             'APP_NAME' => $this->envValue($data['app_name']),
             'APP_ENV' => 'production',
@@ -426,6 +431,7 @@ class InstallationManager
             'APP_URL' => $this->envValue($data['app_url']),
             'LOG_LEVEL' => 'error',
             'SESSION_SECURE_COOKIE' => str_starts_with(strtolower($data['app_url']), 'https://') ? 'true' : 'false',
+            'GATEWAY_VERIFICATION_NODE_ID' => $this->envValue($nodeId),
             'DB_CONNECTION' => $data['db_connection'],
             'DB_HOST' => $this->envValue($data['db_host'] ?? '127.0.0.1'),
             'DB_PORT' => (string) ($data['db_port'] ?? '3306'),
@@ -463,6 +469,7 @@ class InstallationManager
             'app.debug' => false,
             'app.url' => $data['app_url'],
             'session.secure' => str_starts_with(strtolower($data['app_url']), 'https://'),
+            'gateway.verification_node_id' => $nodeId,
         ]);
     }
 
@@ -505,5 +512,19 @@ class InstallationManager
     public function envValue(string $value): string
     {
         return '"'.str_replace(['\\', '"', '$'], ['\\\\', '\\"', '\\$'], $value).'"';
+    }
+
+    public function isPlaceholderNodeId(?string $identity): bool
+    {
+        if ($identity === null || trim($identity) === '') {
+            return true;
+        }
+
+        $normalized = strtolower(trim($identity));
+
+        return in_array($normalized, [
+            'default', 'localhost', 'node', 'node-1', 'upi-gateway-node-1',
+            'change-me', 'change-me-unique-node-id', 'your-node-id',
+        ], true) || str_contains($normalized, 'change-me');
     }
 }

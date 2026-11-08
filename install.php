@@ -25,11 +25,135 @@ if (version_compare(PHP_VERSION, '8.2.0', '<')) {
 $baseDir = __DIR__;
 $installedFile = $baseDir.'/storage/installed';
 
+if (! function_exists('installer_ip_in_range')) {
+    function installer_ip_in_range(string $ip, string $range): bool
+    {
+        if (str_contains($range, '/')) {
+            [$subnet, $bits] = explode('/', $range, 2);
+        } else {
+            $subnet = $range;
+            $bits = str_contains($range, ':') ? 128 : 32;
+        }
+
+        $ipBin = @inet_pton($ip);
+        $subnetBin = @inet_pton($subnet);
+        if ($ipBin === false || $subnetBin === false || strlen($ipBin) !== strlen($subnetBin)) {
+            return false;
+        }
+
+        $bits = (int) $bits;
+        $maxBits = strlen($ipBin) * 8;
+        if ($bits < 0 || $bits > $maxBits) {
+            return false;
+        }
+
+        $bytes = (int) ($bits / 8);
+        $remainder = $bits % 8;
+
+        if ($bytes > 0 && substr($ipBin, 0, $bytes) !== substr($subnetBin, 0, $bytes)) {
+            return false;
+        }
+
+        if ($remainder > 0) {
+            $mask = ~(0xFF >> $remainder) & 0xFF;
+            if ((ord($ipBin[$bytes]) & $mask) !== (ord($subnetBin[$bytes]) & $mask)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
+if (! function_exists('installer_is_https')) {
+    function installer_is_https(array $server = []): bool
+    {
+        // 1. Direct Web Server HTTPS indicators (trusted socket)
+        if (! empty($server['HTTPS']) && strtolower((string) $server['HTTPS']) !== 'off') {
+            return true;
+        }
+
+        if (isset($server['SERVER_PORT']) && (int) $server['SERVER_PORT'] === 443) {
+            return true;
+        }
+
+        // 2. Identify if connection comes from a trusted reverse proxy or Cloudflare
+        $remoteAddr = (string) ($server['REMOTE_ADDR'] ?? '');
+        if ($remoteAddr === '') {
+            return false;
+        }
+
+        // Standard Cloudflare edge proxy CIDR blocks (IPv4 & IPv6)
+        $cloudflareCidrs = [
+            '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+            '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+            '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+            '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+            '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+            '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+        ];
+
+        // Loopback addresses (local Nginx/LiteSpeed reverse proxies on cPanel)
+        $localProxyCidrs = ['127.0.0.1/8', '::1/128'];
+
+        $isCloudflareProxy = false;
+        foreach ($cloudflareCidrs as $cidr) {
+            if (installer_ip_in_range($remoteAddr, $cidr)) {
+                $isCloudflareProxy = true;
+                break;
+            }
+        }
+
+        $isLocalProxy = false;
+        foreach ($localProxyCidrs as $cidr) {
+            if (installer_ip_in_range($remoteAddr, $cidr)) {
+                $isLocalProxy = true;
+                break;
+            }
+        }
+
+        $isConfiguredProxy = false;
+        $trustedProxiesEnv = getenv('TRUSTED_PROXIES') ?: ($_ENV['TRUSTED_PROXIES'] ?? '');
+        if (is_string($trustedProxiesEnv) && trim($trustedProxiesEnv) !== '') {
+            foreach (array_map('trim', explode(',', $trustedProxiesEnv)) as $configured) {
+                if ($configured !== '' && installer_ip_in_range($remoteAddr, $configured)) {
+                    $isConfiguredProxy = true;
+                    break;
+                }
+            }
+        }
+
+        $isTrustedProxy = $isCloudflareProxy || $isLocalProxy || $isConfiguredProxy;
+
+        if (! $isTrustedProxy) {
+            // Forwarded headers from untrusted direct clients MUST NOT be trusted
+            return false;
+        }
+
+        // 3. Cloudflare CF-Visitor scheme detection
+        if (! empty($server['HTTP_CF_VISITOR'])) {
+            $visitor = json_decode((string) $server['HTTP_CF_VISITOR'], true);
+            if (is_array($visitor) && isset($visitor['scheme']) && strtolower((string) $visitor['scheme']) === 'https') {
+                return true;
+            }
+        }
+
+        // 4. Standard X-Forwarded-Proto and X-Forwarded-Ssl from trusted proxies
+        if (! empty($server['HTTP_X_FORWARDED_PROTO']) && strtolower((string) $server['HTTP_X_FORWARDED_PROTO']) === 'https') {
+            return true;
+        }
+
+        if (! empty($server['HTTP_X_FORWARDED_SSL']) && strtolower((string) $server['HTTP_X_FORWARDED_SSL']) === 'on') {
+            return true;
+        }
+
+        return false;
+    }
+}
+
 // ── 2. Session & Security Configuration ──────────────────────────────────────
 if (session_status() === PHP_SESSION_NONE) {
-    $isHttps = (! empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-        || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443)
-        || (! empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+    $isHttps = installer_is_https($_SERVER);
 
     ini_set('session.cookie_httponly', '1');
     ini_set('session.use_only_cookies', '1');

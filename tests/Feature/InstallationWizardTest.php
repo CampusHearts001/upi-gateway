@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Http\Middleware\RedirectIfInstalled;
 use App\Http\Middleware\RedirectToInstall;
 use App\Models\User;
+use App\Services\VerificationNodeIdentity;
 use App\Support\InstallationManager;
 use Dotenv\Loader\Loader;
 use Dotenv\Parser\Parser;
@@ -479,6 +480,91 @@ class InstallationWizardTest extends TestCase
                 'app.debug' => $originalDebug,
                 'app.url' => $originalUrl,
                 'session.secure' => $originalSecureCookie,
+            ]);
+            @unlink($tempEnv);
+        }
+    }
+
+    public function test_installer_replaces_placeholder_node_id_with_cryptographic_id(): void
+    {
+        $installer = app(InstallationManager::class);
+        $tempEnv = tempnam(sys_get_temp_dir(), 'env_node_test_');
+        $originalEnvPath = config('installer.env_path');
+        $originalNodeId = config('gateway.verification_node_id');
+        $originalAppEnv = app()['env'];
+
+        config(['installer.env_path' => $tempEnv]);
+
+        try {
+            // Write environment using standard .env.example template containing change-me-unique-node-id
+            $installer->writeEnvironment([
+                'db_connection' => 'mysql',
+                'db_host' => '127.0.0.1',
+                'db_port' => 3306,
+                'db_database' => 'test_db',
+                'db_username' => 'test_user',
+                'db_password' => 'secret',
+                'app_name' => 'GatewayNodeTest',
+                'app_url' => 'https://gateway.example',
+            ]);
+
+            $envContent = file_get_contents($tempEnv);
+            $this->assertStringNotContainsString('change-me-unique-node-id', $envContent);
+
+            preg_match('/^GATEWAY_VERIFICATION_NODE_ID="(.*)"$/m', $envContent, $matches);
+            $this->assertNotEmpty($matches[1]);
+            $generatedNodeId = $matches[1];
+
+            // Must be a 32-character hexadecimal string
+            $this->assertMatchesRegularExpression('/^[a-f0-9]{32}$/', $generatedNodeId);
+            $this->assertFalse($installer->isPlaceholderNodeId($generatedNodeId));
+
+            // Verify production validation accepts the generated node ID
+            $this->app->detectEnvironment(fn () => 'production');
+            config(['gateway.verification_node_id' => $generatedNodeId]);
+            $nodeIdentity = app(VerificationNodeIdentity::class);
+            $this->assertSame($generatedNodeId, $nodeIdentity->nodeId());
+        } finally {
+            $this->app->detectEnvironment(fn () => $originalAppEnv);
+            config([
+                'installer.env_path' => $originalEnvPath,
+                'gateway.verification_node_id' => $originalNodeId,
+            ]);
+            @unlink($tempEnv);
+        }
+    }
+
+    public function test_installer_preserves_explicit_valid_verification_node_id(): void
+    {
+        $installer = app(InstallationManager::class);
+        $tempEnv = tempnam(sys_get_temp_dir(), 'env_node_explicit_');
+        $originalEnvPath = config('installer.env_path');
+        $originalNodeId = config('gateway.verification_node_id');
+
+        config(['installer.env_path' => $tempEnv]);
+
+        try {
+            $explicitNodeId = 'cpanel-staging-cluster-01';
+
+            $installer->writeEnvironment([
+                'db_connection' => 'mysql',
+                'db_host' => '127.0.0.1',
+                'db_port' => 3306,
+                'db_database' => 'test_db',
+                'db_username' => 'test_user',
+                'db_password' => 'secret',
+                'app_name' => 'GatewayNodeTest',
+                'app_url' => 'https://gateway.example',
+                'verification_node_id' => $explicitNodeId,
+            ]);
+
+            $envContent = file_get_contents($tempEnv);
+            $this->assertStringContainsString('GATEWAY_VERIFICATION_NODE_ID="'.$explicitNodeId.'"', $envContent);
+            $this->assertSame($explicitNodeId, config('gateway.verification_node_id'));
+        } finally {
+            config([
+                'installer.env_path' => $originalEnvPath,
+                'gateway.verification_node_id' => $originalNodeId,
             ]);
             @unlink($tempEnv);
         }

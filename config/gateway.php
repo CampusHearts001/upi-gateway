@@ -64,13 +64,19 @@ return [
 
     // ── Webhook SSRF protection ───────────────────────────────────────────────
     // Allow http:// webhook URLs (for local dev only). Defaults to false.
-    'webhook_allow_insecure' => env('GATEWAY_WEBHOOK_ALLOW_INSECURE', false),
+    // In production, insecure webhooks are strictly forbidden regardless of env value.
+    'webhook_allow_insecure' => env('APP_ENV') === 'production'
+        ? false
+        : (bool) env('GATEWAY_WEBHOOK_ALLOW_INSECURE', false),
     // Ports that webhook URLs may use. 443 always included; add 80 if insecure allowed.
     'webhook_allowed_ports' => [443],
 
     // ── Redirect URL security ─────────────────────────────────────────────────
     // Allow http:// redirect URLs (for local dev only). Defaults to false.
-    'allow_insecure_redirects' => env('GATEWAY_ALLOW_INSECURE_REDIRECTS', false),
+    // In production, insecure redirects are strictly forbidden regardless of env value.
+    'allow_insecure_redirects' => env('APP_ENV') === 'production'
+        ? false
+        : (bool) env('GATEWAY_ALLOW_INSECURE_REDIRECTS', false),
 
     // ── Content-Security-Policy ───────────────────────────────────────────────
     // Set to true to switch from Report-Only to enforcing CSP.

@@ -3,9 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Providers\AppServiceProvider;
 use App\Support\InstallationManager;
+use App\Support\SafeUrl;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
 class ApiRateLimitAndProductionDefaultsTest extends TestCase
@@ -208,6 +211,90 @@ class ApiRateLimitAndProductionDefaultsTest extends TestCase
             if (file_exists($tempEnv)) {
                 @unlink($tempEnv);
             }
+        }
+    }
+
+    public function test_production_environment_forces_insecure_flags_to_false(): void
+    {
+        $originalEnv = app()['env'];
+        $originalDb = config('database.default');
+        $originalWebhookInsecure = config('gateway.webhook_allow_insecure');
+        $originalRedirectInsecure = config('gateway.allow_insecure_redirects');
+
+        try {
+            // Attempt to enable insecure configurations
+            config([
+                'database.default' => 'mysql',
+                'gateway.webhook_allow_insecure' => true,
+                'gateway.allow_insecure_redirects' => true,
+            ]);
+
+            // Switch to production
+            $this->app->detectEnvironment(fn () => 'production');
+
+            // Re-boot AppServiceProvider
+            (new AppServiceProvider($this->app))->boot();
+
+            $this->assertFalse(config('gateway.webhook_allow_insecure'));
+            $this->assertFalse(config('gateway.allow_insecure_redirects'));
+            $this->assertFalse(config('app.debug'));
+        } finally {
+            $this->app->detectEnvironment(fn () => $originalEnv);
+            config([
+                'database.default' => $originalDb,
+                'gateway.webhook_allow_insecure' => $originalWebhookInsecure,
+                'gateway.allow_insecure_redirects' => $originalRedirectInsecure,
+            ]);
+        }
+    }
+
+    public function test_production_blocks_http_webhooks_even_if_attempted(): void
+    {
+        $originalEnv = app()['env'];
+        $originalDb = config('database.default');
+        $originalWebhookInsecure = config('gateway.webhook_allow_insecure');
+
+        try {
+            config(['database.default' => 'mysql']);
+            $this->app->detectEnvironment(fn () => 'production');
+            (new AppServiceProvider($this->app))->boot();
+
+            $safeUrl = new SafeUrl(resolver: fn (string $host) => ['93.184.216.34']);
+            $this->expectException(ValidationException::class);
+            $safeUrl->validate('http://example.com/webhook');
+        } finally {
+            $this->app->detectEnvironment(fn () => $originalEnv);
+            config([
+                'database.default' => $originalDb,
+                'gateway.webhook_allow_insecure' => $originalWebhookInsecure,
+            ]);
+        }
+    }
+
+    public function test_non_production_allows_insecure_flags_when_explicitly_configured(): void
+    {
+        $originalWebhookInsecure = config('gateway.webhook_allow_insecure');
+        $originalRedirectInsecure = config('gateway.allow_insecure_redirects');
+
+        try {
+            config([
+                'gateway.webhook_allow_insecure' => true,
+                'gateway.allow_insecure_redirects' => true,
+            ]);
+
+            $this->assertTrue(config('gateway.webhook_allow_insecure'));
+            $this->assertTrue(config('gateway.allow_insecure_redirects'));
+
+            // SafeUrl should allow http on port 80 in non-production when configured
+            $safeUrl = new SafeUrl(resolver: fn (string $host) => ['93.184.216.34']);
+            $validated = $safeUrl->validate('http://example.com/webhook');
+            $this->assertSame(80, $validated['port']);
+            $this->assertSame('example.com', $validated['host']);
+        } finally {
+            config([
+                'gateway.webhook_allow_insecure' => $originalWebhookInsecure,
+                'gateway.allow_insecure_redirects' => $originalRedirectInsecure,
+            ]);
         }
     }
 }
