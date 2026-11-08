@@ -99,4 +99,72 @@ class DeploymentCompatibilityTest extends TestCase
         $this->assertStringNotContainsString('try_files $uri $uri/', $configuration);
         $this->assertStringNotContainsString('root /private/gateway', $configuration);
     }
+
+    public function test_storage_self_healing_creates_missing_directories_without_insecure_permissions(): void
+    {
+        $tempRoot = sys_get_temp_dir().'/storage_heal_'.bin2hex(random_bytes(6));
+        mkdir($tempRoot, 0755, true);
+
+        // Pre-create an existing file to verify data preservation
+        mkdir($tempRoot.'/storage/app/public', 0755, true);
+        file_put_contents($tempRoot.'/storage/app/public/user_file.txt', 'do not overwrite');
+
+        try {
+            $requiredDirectories = [
+                $tempRoot.'/storage/app/public',
+                $tempRoot.'/storage/app/private',
+                $tempRoot.'/storage/framework/cache/data',
+                $tempRoot.'/storage/framework/sessions',
+                $tempRoot.'/storage/framework/views',
+                $tempRoot.'/storage/logs',
+                $tempRoot.'/bootstrap/cache',
+            ];
+
+            foreach ($requiredDirectories as $dir) {
+                if (! is_dir($dir)) {
+                    @mkdir($dir, 0755, true);
+                }
+            }
+
+            foreach ($requiredDirectories as $dir) {
+                $this->assertTrue(is_dir($dir), "Directory {$dir} was not created.");
+                $perms = fileperms($dir) & 0777;
+                // Assert permissions are not insecure 0777
+                $this->assertNotSame(0777, $perms, "Directory {$dir} has insecure 777 permissions.");
+            }
+
+            // Verify pre-existing data was preserved
+            $this->assertSame('do not overwrite', file_get_contents($tempRoot.'/storage/app/public/user_file.txt'));
+        } finally {
+            @unlink($tempRoot.'/storage/app/public/user_file.txt');
+            @rmdir($tempRoot.'/storage/app/public');
+            @rmdir($tempRoot.'/storage/app/private');
+            @rmdir($tempRoot.'/storage/app');
+            @rmdir($tempRoot.'/storage/framework/cache/data');
+            @rmdir($tempRoot.'/storage/framework/cache');
+            @rmdir($tempRoot.'/storage/framework/sessions');
+            @rmdir($tempRoot.'/storage/framework/views');
+            @rmdir($tempRoot.'/storage/framework');
+            @rmdir($tempRoot.'/storage/logs');
+            @rmdir($tempRoot.'/storage');
+            @rmdir($tempRoot.'/bootstrap/cache');
+            @rmdir($tempRoot.'/bootstrap');
+            @rmdir($tempRoot);
+        }
+    }
+
+    public function test_git_attributes_preserves_storage_dotfiles_in_export(): void
+    {
+        $attributes = file_get_contents(base_path('.gitattributes'));
+
+        // Root .gitignore must be anchored so nested storage dotfiles are preserved
+        $this->assertStringContainsString('/.gitignore export-ignore', $attributes);
+        $this->assertStringNotContainsString("\n.gitignore export-ignore", $attributes);
+
+        // Required production assets and autoload must be present
+        $this->assertFileExists(base_path('vendor/autoload.php'));
+        $this->assertFileExists(base_path('public/build/manifest.json'));
+        $this->assertFileExists(base_path('public/deployment-check.json'));
+        $this->assertFileExists(base_path('bootstrap/cache/packages.php'));
+    }
 }

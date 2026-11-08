@@ -32,8 +32,8 @@ phpunit.xml export-ignore
 /scripts/** export-ignore
 /scripts export-ignore
 /deployment-private-check.txt export-ignore
-.gitignore export-ignore
-.gitattributes export-ignore
+/.gitignore export-ignore
+/.gitattributes export-ignore
 node_modules export-ignore
 node_modules/** export-ignore
 *.sqlite* export-ignore

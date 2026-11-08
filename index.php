@@ -30,7 +30,7 @@ if ($publicDir && $parsedPath !== '' && $parsedPath !== '/') {
     $relativePath = '/'.ltrim((string) $relativePath, '/');
 
     // Only inspect requests targeting known public asset folders or root files
-    if (preg_match('~^/(build/|images/|css/|favicon\.ico|robots\.txt)~i', $relativePath)) {
+    if (preg_match('~^/(build/|images/|css/|favicon\.ico|robots\.txt|deployment-check\.json)~i', $relativePath)) {
         $targetFile = realpath($publicDir.$relativePath);
 
         $allowedExtensions = [

@@ -60,6 +60,12 @@ with tempfile.TemporaryDirectory(prefix="upi-hosting-") as temporary:
     if os.environ.get("TEST_PACKAGE"):
         with zipfile.ZipFile(os.environ["TEST_PACKAGE"]) as package:
             package.extractall(app)
+        subdirs = [d for d in app.iterdir() if d.is_dir()]
+        if len(list(app.iterdir())) == 1 and subdirs:
+            root_sub = subdirs[0]
+            for item in list(root_sub.iterdir()):
+                shutil.move(str(item), str(app))
+            root_sub.rmdir()
     else:
         for directory in ["app", "config", "routes", "resources", "public", "database"]:
             shutil.copytree(PROJECT / directory, app / directory, symlinks=True, ignore=shutil.ignore_patterns("*.sqlite", "*.sqlite-*"))

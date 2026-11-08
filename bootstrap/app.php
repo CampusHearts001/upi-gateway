@@ -14,6 +14,26 @@ use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Session\Middleware\AuthenticateSession;
 
+// ── Safe Runtime Storage Self-Healing ─────────────────────────────────────────
+// Automatically ensures required storage and cache skeletons exist on fresh
+// extractions. Only creates missing directories with safe 0755 permissions.
+$appRoot = dirname(__DIR__);
+$runtimeDirectories = [
+    $appRoot.'/storage/app/public',
+    $appRoot.'/storage/app/private',
+    $appRoot.'/storage/framework/cache/data',
+    $appRoot.'/storage/framework/sessions',
+    $appRoot.'/storage/framework/views',
+    $appRoot.'/storage/logs',
+    $appRoot.'/bootstrap/cache',
+];
+
+foreach ($runtimeDirectories as $runtimeDir) {
+    if (! is_dir($runtimeDir)) {
+        @mkdir($runtimeDir, 0755, true);
+    }
+}
+
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
         web: __DIR__.'/../routes/web.php',
@@ -49,7 +69,8 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->redirectUsersTo(fn () => route('dashboard'));
 
         // Paytm PG POSTs the customer back here from its own domain.
-        $middleware->validateCsrfTokens(except: ['pay/*/return']);
+        // install.php manages its own session CSRF validation independently.
+        $middleware->validateCsrfTokens(except: ['pay/*/return', 'install.php', '*/install.php']);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

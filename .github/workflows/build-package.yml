@@ -184,6 +184,59 @@ jobs:
           rm -rf "${SANDBOX_DIR}"
           echo "Validation completed successfully."
 
+      - name: Validate GitHub main branch archive integrity (git archive)
+        run: |
+          set -euo pipefail
+          echo "Simulating GitHub main branch archive export..."
+          ARCHIVE_DIR=$(mktemp -d)
+          ARCHIVE_ZIP="${ARCHIVE_DIR}/main.zip"
+          git archive HEAD --format=zip --prefix=upi-gateway-main/ -o "${ARCHIVE_ZIP}"
+
+          echo "Extracting main branch archive into sandbox..."
+          EXTRACT_DIR=$(mktemp -d)
+          unzip -q "${ARCHIVE_ZIP}" -d "${EXTRACT_DIR}"
+          ROOT="${EXTRACT_DIR}/upi-gateway-main"
+
+          echo "Asserting required files and dependencies in main branch archive..."
+          test -f "${ROOT}/vendor/autoload.php" || { echo "Missing vendor/autoload.php in main branch archive"; exit 1; }
+          test -f "${ROOT}/public/build/manifest.json" || { echo "Missing public/build/manifest.json in main branch archive"; exit 1; }
+          test -f "${ROOT}/bootstrap/cache/packages.php" || { echo "Missing bootstrap/cache/packages.php in main branch archive"; exit 1; }
+          test -f "${ROOT}/artisan" || { echo "Missing artisan in main branch archive"; exit 1; }
+          test -f "${ROOT}/index.php" || { echo "Missing root index.php in main branch archive"; exit 1; }
+          test -f "${ROOT}/public/index.php" || { echo "Missing public/index.php in main branch archive"; exit 1; }
+          test -f "${ROOT}/install.php" || { echo "Missing install.php in main branch archive"; exit 1; }
+          test -f "${ROOT}/public/install.php" || { echo "Missing public/install.php in main branch archive"; exit 1; }
+          test -f "${ROOT}/.htaccess" || { echo "Missing root .htaccess in main branch archive"; exit 1; }
+          test -f "${ROOT}/public/.htaccess" || { echo "Missing public/.htaccess in main branch archive"; exit 1; }
+          test -f "${ROOT}/.env.example" || { echo "Missing .env.example in main branch archive"; exit 1; }
+          test -f "${ROOT}/public/deployment-check.json" || { echo "Missing public/deployment-check.json in main branch archive"; exit 1; }
+
+          echo "Asserting storage directory preservation in main branch archive..."
+          test -d "${ROOT}/storage/app/public" || { echo "Missing storage/app/public in main branch archive"; exit 1; }
+          test -d "${ROOT}/storage/app/private" || { echo "Missing storage/app/private in main branch archive"; exit 1; }
+          test -d "${ROOT}/storage/framework/cache/data" || { echo "Missing storage/framework/cache/data in main branch archive"; exit 1; }
+          test -d "${ROOT}/storage/framework/sessions" || { echo "Missing storage/framework/sessions in main branch archive"; exit 1; }
+          test -d "${ROOT}/storage/framework/views" || { echo "Missing storage/framework/views in main branch archive"; exit 1; }
+          test -d "${ROOT}/storage/logs" || { echo "Missing storage/logs in main branch archive"; exit 1; }
+
+          echo "Asserting exclusion of private and development files..."
+          test ! -f "${ROOT}/.env" || { echo "Forbidden .env in main branch archive"; exit 1; }
+          test ! -d "${ROOT}/tests" || { echo "Forbidden tests/ in main branch archive"; exit 1; }
+          test ! -d "${ROOT}/.git" || { echo "Forbidden .git/ in main branch archive"; exit 1; }
+          test ! -d "${ROOT}/node_modules" || { echo "Forbidden node_modules in main branch archive"; exit 1; }
+          test -z "$(find "${ROOT}" -name "*.sqlite*")" || { echo "Forbidden SQLite in main branch archive"; exit 1; }
+
+          echo "Verifying PHP syntax and runtime boot on main branch archive..."
+          php -l "${ROOT}/index.php"
+          php -l "${ROOT}/public/index.php"
+          php -l "${ROOT}/install.php"
+          php -l "${ROOT}/public/install.php"
+          php "${ROOT}/artisan" --version
+          php "${ROOT}/artisan" about --only=environment
+
+          rm -rf "${ARCHIVE_DIR}" "${EXTRACT_DIR}"
+          echo "Main branch archive validation passed successfully."
+
       - name: Upload production package artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:

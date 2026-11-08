@@ -67,9 +67,9 @@ if (! file_exists(__DIR__.'/../vendor/autoload.php')) {
             <div class="box">
                 <strong>Common Causes &amp; Solutions:</strong>
                 <ul>
-                    <li><strong>Source Code vs Production Package:</strong> If you downloaded the repository via GitHub&rsquo;s green &ldquo;Code &rarr; Download ZIP&rdquo; or <code>git clone</code>, it does not include <code>vendor/</code>. Please download the official ready-to-install package below.</li>
-                    <li><strong>Nested Extraction:</strong> If your hosting File Manager extracted files into a subfolder (e.g., <code>upi-gateway-main-.../</code>), move all files directly into the website directory.</li>
-                    <li><strong>Incomplete Extraction:</strong> Ensure your hosting account has enough disk space and file inode quota.</li>
+                    <li><strong>Incomplete Extraction:</strong> Ensure the ZIP package fully extracted and your hosting account has enough disk space and file inode quota.</li>
+                    <li><strong>Nested Extraction:</strong> If your hosting File Manager extracted files into a subfolder (e.g., <code>upi-gateway-main/</code>), move all files directly into the website directory.</li>
+                    <li><strong>Alternative Download:</strong> Both the GitHub <code>main.zip</code> and official Release ZIP include pre-bundled dependencies. If your download was truncated, re-download the verified production package below.</li>
                 </ul>
             </div>
             <a href="https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip" class="btn" target="_blank" rel="noopener">Download Ready-to-Install Package</a>
@@ -92,7 +92,7 @@ if ($deploymentRequestPath === $deploymentBasePath.'/__upi_deployment_check') {
 }
 
 // ── 3. Uninstalled Application Redirection (Domain Root & Subdirectory) ──────
-if (! is_file(__DIR__.'/../.env')) {
+if (! is_file(__DIR__.'/../.env') || ! file_exists(__DIR__.'/../storage/installed')) {
     $uri = $_SERVER['REQUEST_URI'] ?? '/';
     $path = parse_url($uri, PHP_URL_PATH) ?: '/';
 

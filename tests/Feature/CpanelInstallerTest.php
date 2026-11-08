@@ -869,6 +869,7 @@ class CpanelInstallerTest extends TestCase
         mkdir($tempDir.'/public/build/assets', 0755, true);
         file_put_contents($tempDir.'/public/build/manifest.json', '{"test": true}');
         file_put_contents($tempDir.'/public/build/assets/test.css', 'body { color: red; }');
+        file_put_contents($tempDir.'/public/deployment-check.json', '{"application":"upi-gateway","public_assets":true}');
         file_put_contents($tempDir.'/.env', 'SECRET=hidden');
         copy(base_path('index.php'), $tempDir.'/index.php');
         file_put_contents($tempDir.'/public/index.php', "<?php echo 'LARAVEL_APP';\n");
@@ -900,8 +901,19 @@ class CpanelInstallerTest extends TestCase
             $resLogin = curl_exec($ch);
             curl_close($ch);
             $this->assertStringContainsString('LARAVEL_APP', (string) $resLogin);
+
+            // 4. deployment-check.json is served with application/json
+            $ch = curl_init("http://127.0.0.1:{$port}/deployment-check.json");
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_HEADER, true);
+            $resCheck = curl_exec($ch);
+            curl_close($ch);
+            $this->assertStringContainsString('HTTP/1.1 200 OK', $resCheck);
+            $this->assertStringContainsString('content-type: application/json', strtolower($resCheck));
+            $this->assertStringContainsString('public_assets', $resCheck);
         } finally {
             $this->stopPhpServer($process);
+            @unlink($tempDir.'/public/deployment-check.json');
             @unlink($tempDir.'/public/build/assets/test.css');
             @unlink($tempDir.'/public/build/manifest.json');
             @unlink($tempDir.'/public/index.php');
