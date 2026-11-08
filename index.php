@@ -11,7 +11,6 @@
  * server Running Directory / Document Root to /public is MANDATORY to prevent direct
  * public HTTP access to .env, storage/, vendor/, and application source files.
  */
-
 if (file_exists(__DIR__.'/public/index.php')) {
     require_once __DIR__.'/public/index.php';
 } else {
