@@ -2,7 +2,9 @@
 /node_modules
 
 # Development-only packages inside vendor (production packages are tracked)
+/vendor/bin
 /vendor/fakerphp
+/vendor/filp
 /vendor/hamcrest
 /vendor/laravel/pail
 /vendor/laravel/pint
@@ -14,6 +16,7 @@
 /vendor/phpunit
 /vendor/sebastian
 /vendor/staabm
+/vendor/symfony/yaml
 /vendor/theseer
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -36,6 +39,7 @@
 /storage/pail
 /storage/installed
 /storage/installer-setup-token
+/storage/installer-setup-password
 /storage/installer-setup-lock
 /storage/installer-in-progress
 

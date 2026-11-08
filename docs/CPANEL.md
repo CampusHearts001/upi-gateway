@@ -141,7 +141,7 @@ If your hosting plan cannot point the domain's document root at `public/`, ask t
 
 Navigate to `https://yourdomain.com/install` or `https://yourdomain.com/install.php` in your browser. With the document root pointed at `public/`, the latter uses `public/install.php`.
 
-On the first installer visit, open `storage/installer-setup-token` in cPanel File Manager under the private application directory. Enter the 64 characters before the colon in the database setup form. Reopen the file after each attempt because the token rotates; an expired token is refreshed when you revisit the installer. Do not place the file in `public/` or share it; the installer deletes it after successful setup.
+For security, the uninstalled gateway is protected with a temporary Setup Password. On first access, check `storage/installer-setup-password` in cPanel File Manager under your private application directory. Enter this password to unlock configuration (or authenticate directly using your browser's HTTP Basic Auth prompt). The password remains stable throughout setup and does not rotate on database connection errors. The database setup screen requires only your standard MySQL credentials. Once setup completes, the setup password file is automatically deleted and the installer is permanently locked.
 
 The wizard runs through 5 automated steps:
 

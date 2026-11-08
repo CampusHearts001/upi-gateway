@@ -62,7 +62,134 @@ class InstallationManager
             if ($record === null || $record['expires'] <= time()) {
                 $this->writeTokenRecord();
             }
+            $pwdPath = $this->setupPasswordPath();
+            if (! file_exists($pwdPath) || ! $this->privateFileIsValid($pwdPath)) {
+                $this->writeSetupPassword();
+            }
         });
+    }
+
+    public function setupPasswordPath(): string
+    {
+        return config('installer.setup_password_path', storage_path('installer-setup-password'));
+    }
+
+    public function ensureSetupPassword(): void
+    {
+        $this->ensureSetupToken();
+    }
+
+    public function writeSetupPassword(?string $customPassword = null): string
+    {
+        $password = $customPassword ?? bin2hex(random_bytes(8));
+        $path = $this->setupPasswordPath();
+        if (file_exists($path) || is_link($path)) {
+            if (! $this->privateFileIsValid($path)) {
+                throw new RuntimeException('Installer setup password file is unsafe.');
+            }
+            $temporary = $path.'.'.bin2hex(random_bytes(8));
+            $this->createPrivateFile($temporary, $password);
+            if (! rename($temporary, $path)) {
+                @unlink($temporary);
+                throw new RuntimeException('Installer setup password could not be saved.');
+            }
+        } else {
+            $this->createPrivateFile($path, $password);
+        }
+
+        return $password;
+    }
+
+    public function getSetupPassword(): ?string
+    {
+        $path = $this->setupPasswordPath();
+        if (! $this->privateFileIsValid($path)) {
+            return null;
+        }
+        $content = @file_get_contents($path);
+        if ($content === false) {
+            return null;
+        }
+        $pwd = trim($content);
+
+        return $pwd !== '' ? $pwd : null;
+    }
+
+    public function verifySetupPassword(?string $password): bool
+    {
+        if (! is_string($password) || trim($password) === '') {
+            return false;
+        }
+        if ($this->isInstalled()) {
+            return false;
+        }
+
+        $expected = $this->getSetupPassword();
+        if ($expected !== null && hash_equals($expected, trim($password))) {
+            return true;
+        }
+
+        return $this->validSetupToken($password);
+    }
+
+    public function extractBasicAuthPassword($request = null): ?string
+    {
+        if (is_object($request) && method_exists($request, 'getPassword')) {
+            $pwd = $request->getPassword();
+            if ($pwd !== null && $pwd !== '') {
+                return (string) $pwd;
+            }
+        }
+        if (! empty($_SERVER['PHP_AUTH_PW'])) {
+            return (string) $_SERVER['PHP_AUTH_PW'];
+        }
+
+        $header = null;
+        if (is_object($request) && method_exists($request, 'header')) {
+            $header = $request->header('Authorization') ?: $request->header('REDIRECT_HTTP_AUTHORIZATION');
+        }
+        if (! is_string($header)) {
+            $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? null;
+        }
+
+        if (is_string($header) && str_starts_with(strtolower($header), 'basic ')) {
+            $decoded = base64_decode(substr($header, 6));
+            if ($decoded !== false && str_contains($decoded, ':')) {
+                [, $pwd] = explode(':', $decoded, 2);
+
+                return $pwd;
+            }
+        }
+
+        return null;
+    }
+
+    public function isRequestAuthorized($request = null): bool
+    {
+        if (is_object($request) && method_exists($request, 'session')) {
+            $session = $request->session();
+            if (is_object($session) && method_exists($session, 'get') && $session->get('installer.setup_authorized') === true) {
+                return true;
+            }
+        } elseif (! empty($_SESSION['_installer_setup_authorized'])) {
+            return true;
+        }
+
+        $basicPassword = $this->extractBasicAuthPassword($request);
+        if ($basicPassword !== null && $this->verifySetupPassword($basicPassword)) {
+            if (is_object($request) && method_exists($request, 'session')) {
+                $session = $request->session();
+                if (is_object($session) && method_exists($session, 'put')) {
+                    $session->put('installer.setup_authorized', true);
+                }
+            } else {
+                $_SESSION['_installer_setup_authorized'] = true;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     public function validSetupToken(?string $token): bool
@@ -80,7 +207,14 @@ class InstallationManager
     public function consumeSetupToken(?string $token): bool
     {
         return $this->withSetupLock(function () use ($token): bool {
-            if (! $this->validSetupToken($token) || $this->isInstalled()) {
+            if ($this->isInstalled()) {
+                return false;
+            }
+            $pwd = $this->getSetupPassword();
+            if ($pwd !== null && is_string($token) && hash_equals($pwd, trim($token))) {
+                return true;
+            }
+            if (! $this->validSetupToken($token)) {
                 return false;
             }
             // Rotate before database work. The old value cannot be replayed;
@@ -486,6 +620,9 @@ class InstallationManager
         chmod($path, 0600);
         if (is_file($this->setupTokenPath()) && ! @unlink($this->setupTokenPath())) {
             throw new RuntimeException('The installer setup token could not be removed.');
+        }
+        if (is_file($this->setupPasswordPath()) && ! @unlink($this->setupPasswordPath())) {
+            throw new RuntimeException('The installer setup password could not be removed.');
         }
         @unlink($this->inProgressPath());
     }

@@ -28,6 +28,7 @@ class InstallationWizardTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        $_SESSION = [];
         config([
             'installer.setup_token_path' => storage_path('framework/testing/installer-token'),
             'installer.setup_lock_path' => storage_path('framework/testing/installer-lock'),
@@ -41,6 +42,7 @@ class InstallationWizardTest extends TestCase
 
     protected function tearDown(): void
     {
+        $_SESSION = [];
         @unlink(config('installer.setup_token_path'));
         @unlink(config('installer.setup_lock_path'));
         @unlink(config('installer.in_progress_path'));
@@ -68,7 +70,17 @@ class InstallationWizardTest extends TestCase
             ->assertSee('Server Requirements')
             ->assertSee('PDO MySQL (required)')
             ->assertDontSee('PDO SQLite');
-        $this->get(route('install.database'))->assertOk()
+
+        // Unauthorized visitor cannot view database configuration
+        $this->get(route('install.database'))
+            ->assertStatus(401)
+            ->assertSee('Setup Authentication')
+            ->assertDontSee('MySQL is required');
+
+        // Authorized visitor can view database configuration
+        $this->withSession(['installer.setup_authorized' => true])
+            ->get(route('install.database'))
+            ->assertOk()
             ->assertSee('MySQL is required')
             ->assertDontSee('SQLite');
     }

@@ -17,14 +17,18 @@ class RedirectToInstall
         // A clean installation has no `sessions` table yet. Installer pages
         // therefore use file sessions until migrations and admin creation finish.
         if ($installerRequest) {
-            $originalDriver = config('session.driver');
-            config(['session.driver' => 'file']);
+            if (config('session.driver') !== 'array') {
+                $originalDriver = config('session.driver');
+                config(['session.driver' => 'file']);
 
-            try {
-                return $next($request);
-            } finally {
-                config(['session.driver' => $originalDriver]);
+                try {
+                    return $next($request);
+                } finally {
+                    config(['session.driver' => $originalDriver]);
+                }
             }
+
+            return $next($request);
         }
 
         if (! $this->installer->isInstalled()) {

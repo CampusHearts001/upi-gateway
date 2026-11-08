@@ -3,16 +3,10 @@
 
 @section('content')
 <h1 class="text-2xl font-bold text-slate-900">Database Setup</h1>
-<p class="mt-1 text-sm text-slate-500">Configure your database connection.</p>
+<p class="mt-1 text-sm text-slate-500">Configure your MySQL database connection.</p>
 
 <form method="POST" action="{{ route('install.database.save') }}" class="mt-6 space-y-5">
     @csrf
-
-    <div>
-        <label class="label">One-time setup token</label>
-        <input type="password" name="setup_token" class="input" autocomplete="off" required>
-        <p class="mt-1 text-sm text-slate-500">Read <code>storage/installer-setup-token</code> using cPanel File Manager or your server shell. Enter only the 64 characters before the colon. Reopen the file after each attempt; the token rotates and expires. The file is removed after installation.</p>
-    </div>
 
     <div>
         <label class="label">App Name</label>

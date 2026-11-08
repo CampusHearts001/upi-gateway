@@ -71,7 +71,7 @@ Issue a TLS certificate with the approved certificate tooling before production 
 
 For a TLS-terminating reverse proxy, set `APP_URL=https://your-domain.example` and `TRUSTED_PROXIES` to the comma-separated IP addresses or CIDR ranges of proxies that connect directly to PHP (for example, `10.0.0.5`). Never use `*`. At the public edge, replace client-supplied `X-Forwarded-For` and `X-Forwarded-Proto` with the verified client address and scheme; pass those headers only through trusted internal proxies. Restrict origin access to those proxies. For Cloudflare, use its current published proxy IP ranges and keep them updated; do not trust `CF-Connecting-IP` or client-supplied forwarded headers directly. Production payment URLs use the canonical `APP_URL` host and HTTPS. Verify HSTS on a public HTTPS response after deployment.
 
-On the first installer visit, read the 64 characters before the colon from the private `storage/installer-setup-token` file and enter them on the database setup page. Reopen the file after each attempt because the token rotates; visiting the installer refreshes an expired token. Keep the file outside `public/`; successful installation removes it.
+On first access, the installer creates a private Setup Password in `storage/installer-setup-password`. Enter this password when prompted (or via HTTP Basic Auth) to unlock the wizard. The password remains stable throughout setup. The database setup screen requires only your standard MySQL credentials without manual token entry. Successful installation automatically removes the setup password file.
 
 ## 5. Run the web wizard
 

@@ -787,4 +787,168 @@ class CpanelInstallerTest extends TestCase
             @rmdir($tempDir);
         }
     }
+
+    public function test_installer_setup_password_creation_and_removal(): void
+    {
+        $this->removeInstallationMarker();
+        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
+        $pwdPath = storage_path('framework/testing/test-setup-pwd-'.bin2hex(random_bytes(6)));
+        $progressPath = $pwdPath.'-progress';
+        $lockPath = $pwdPath.'-lock';
+        config([
+            'installer.env_path' => $envPath,
+            'installer.setup_password_path' => $pwdPath,
+            'installer.in_progress_path' => $progressPath,
+            'installer.setup_lock_path' => $lockPath,
+        ]);
+        $installer = app(InstallationManager::class);
+
+        try {
+            $installer->ensureSetupPassword();
+            $this->assertFileExists($pwdPath);
+            $this->assertSame(0600, fileperms($pwdPath) & 0777);
+            $pwd = $installer->getSetupPassword();
+            $this->assertNotNull($pwd);
+            $this->assertMatchesRegularExpression('/^[a-f0-9]{16}$/', $pwd);
+            $this->assertTrue($installer->verifySetupPassword($pwd));
+            $this->assertFalse($installer->verifySetupPassword('wrong-password'));
+
+            $installer->markInstalled();
+            $this->assertFileDoesNotExist($pwdPath);
+        } finally {
+            @unlink($envPath);
+            @unlink($pwdPath);
+            @unlink($progressPath);
+            @unlink($lockPath);
+            @unlink(config('installer.installed_path'));
+        }
+    }
+
+    public function test_installer_accepts_http_basic_authentication(): void
+    {
+        $this->removeInstallationMarker();
+        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
+        $pwdPath = storage_path('framework/testing/basic-auth-pwd-'.bin2hex(random_bytes(6)));
+        $progressPath = $pwdPath.'-progress';
+        $lockPath = $pwdPath.'-lock';
+        config([
+            'installer.env_path' => $envPath,
+            'installer.setup_password_path' => $pwdPath,
+            'installer.in_progress_path' => $progressPath,
+            'installer.setup_lock_path' => $lockPath,
+        ]);
+        $installer = app(InstallationManager::class);
+        $installer->ensureSetupPassword();
+        $pwd = $installer->getSetupPassword();
+        $this->assertNotNull($pwd);
+
+        try {
+            // Unauthorized access returns 401 with WWW-Authenticate header
+            $unauth = $this->get('/install/database');
+            $unauth->assertStatus(401);
+            $unauth->assertHeader('WWW-Authenticate', 'Basic realm="UPI Gateway Installation"');
+            $unauth->assertSee('Setup Authentication');
+            $unauth->assertDontSee('One-time setup token');
+
+            // Authorized access with HTTP Basic Auth succeeds
+            $auth = $this->withHeaders([
+                'Authorization' => 'Basic '.base64_encode('admin:'.$pwd),
+            ])->get('/install/database');
+            $auth->assertOk();
+            $auth->assertSee('Database Setup');
+            $auth->assertDontSee('One-time setup token');
+        } finally {
+            @unlink($envPath);
+            @unlink($pwdPath);
+            @unlink($progressPath);
+            @unlink($lockPath);
+        }
+    }
+
+    public function test_installer_unlock_with_setup_password_allows_token_free_database_configuration(): void
+    {
+        $this->removeInstallationMarker();
+        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
+        $pwdPath = storage_path('framework/testing/unlock-pwd-'.bin2hex(random_bytes(6)));
+        $progressPath = $pwdPath.'-progress';
+        $lockPath = $pwdPath.'-lock';
+        config([
+            'installer.env_path' => $envPath,
+            'installer.setup_password_path' => $pwdPath,
+            'installer.in_progress_path' => $progressPath,
+            'installer.setup_lock_path' => $lockPath,
+        ]);
+        $installer = app(InstallationManager::class);
+        $installer->ensureSetupPassword();
+        $pwd = $installer->getSetupPassword();
+        $this->assertNotNull($pwd);
+
+        try {
+            // Unlocking with wrong password fails
+            $fail = $this->from('/install')->post('/install/unlock', ['setup_password' => 'wrong-password']);
+            $fail->assertSessionHasErrors('setup_password');
+
+            // Unlocking with valid setup password succeeds and authorizes session
+            $success = $this->from('/install')->post('/install/unlock', ['setup_password' => $pwd]);
+            $success->assertRedirect(route('install.database'));
+            $this->assertTrue(session('installer.setup_authorized'));
+
+            // Database setup page is now accessible and has NO token field
+            $dbPage = $this->get('/install/database');
+            $dbPage->assertOk();
+            $dbPage->assertSee('Database Setup');
+            $dbPage->assertDontSee('setup_token');
+            $dbPage->assertDontSee('One-time setup token');
+        } finally {
+            @unlink($envPath);
+            @unlink($pwdPath);
+            @unlink($progressPath);
+            @unlink($lockPath);
+        }
+    }
+
+    public function test_database_failure_does_not_rotate_setup_password(): void
+    {
+        $this->removeInstallationMarker();
+        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
+        $pwdPath = storage_path('framework/testing/no-rotate-pwd-'.bin2hex(random_bytes(6)));
+        $progressPath = $pwdPath.'-progress';
+        $lockPath = $pwdPath.'-lock';
+        config([
+            'installer.env_path' => $envPath,
+            'installer.setup_password_path' => $pwdPath,
+            'installer.in_progress_path' => $progressPath,
+            'installer.setup_lock_path' => $lockPath,
+        ]);
+        $installer = app(InstallationManager::class);
+        $installer->ensureSetupPassword();
+        $originalPwd = $installer->getSetupPassword();
+        $this->assertNotNull($originalPwd);
+
+        try {
+            $this->withSession(['installer.setup_authorized' => true])
+                ->from('/install/database')
+                ->post('/install/database', [
+                    'db_connection' => 'mysql',
+                    'db_host' => '127.0.0.1',
+                    'db_port' => 65530, // Unused port triggers connection failure
+                    'db_database' => 'invalid_db',
+                    'db_username' => 'invalid_user',
+                    'db_password' => 'invalid_pass',
+                    'app_url' => 'https://gateway.example',
+                    'app_name' => 'Gateway',
+                ])
+                ->assertRedirect('/install/database')
+                ->assertSessionHasErrors('db_host');
+
+            // Password remains identical (did not rotate)
+            $this->assertSame($originalPwd, $installer->getSetupPassword());
+            $this->assertTrue($installer->verifySetupPassword($originalPwd));
+        } finally {
+            @unlink($envPath);
+            @unlink($pwdPath);
+            @unlink($progressPath);
+            @unlink($lockPath);
+        }
+    }
 }

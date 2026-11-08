@@ -16,16 +16,38 @@ class InstallController extends Controller
 {
     public function __construct(private InstallationManager $installer) {}
 
-    public function index()
+    public function index(Request $request)
     {
-        $this->installer->ensureSetupToken();
+        $this->installer->ensureSetupPassword();
+        $isAuthorized = $this->installer->isRequestAuthorized($request);
 
-        return view('install.index', ['requirements' => $this->installer->checkRequirements()]);
+        return view('install.index', [
+            'requirements' => $this->installer->checkRequirements(),
+            'isAuthorized' => $isAuthorized,
+        ]);
     }
 
-    public function database()
+    public function unlock(Request $request)
     {
-        $this->installer->ensureSetupToken();
+        $password = $request->input('setup_password');
+        if (! $this->installer->verifySetupPassword(is_string($password) ? $password : null)) {
+            return back()->withErrors(['setup_password' => 'Invalid setup password. Check storage/installer-setup-password in File Manager.']);
+        }
+
+        $request->session()->regenerate();
+        $request->session()->put('installer.setup_authorized', true);
+
+        return redirect()->route('install.database');
+    }
+
+    public function database(Request $request)
+    {
+        $this->installer->ensureSetupPassword();
+
+        if (! $this->installer->isRequestAuthorized($request)) {
+            return response()->view('install.auth', [], 401)
+                ->header('WWW-Authenticate', 'Basic realm="UPI Gateway Installation"');
+        }
 
         return view('install.database');
     }
@@ -33,11 +55,18 @@ class InstallController extends Controller
     public function databaseSave(Request $request)
     {
         $setupToken = $request->input('setup_token');
-        if (! $this->installer->consumeSetupToken(is_string($setupToken) ? $setupToken : null)) {
-            abort(403, 'Invalid installer setup token.');
+        if ($setupToken !== null && $setupToken !== '') {
+            $isAuthorized = $this->installer->consumeSetupToken(is_string($setupToken) ? $setupToken : null);
+        } else {
+            $isAuthorized = $this->installer->isRequestAuthorized($request);
+        }
+
+        if (! $isAuthorized) {
+            abort(403, 'Installer setup authorization is required.');
         }
 
         $request->session()->regenerate();
+        $request->session()->put('installer.setup_authorized', true);
 
         $data = $request->validate([
             'db_connection' => 'required|in:mysql',
