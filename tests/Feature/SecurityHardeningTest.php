@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Http\Middleware\RedirectIfInstalled;
+use App\Http\Middleware\RedirectToInstall;
 use App\Models\AdminAuditLog;
 use App\Models\Order;
 use App\Models\User;
@@ -534,7 +535,8 @@ class SecurityHardeningTest extends TestCase
             ));
 
             $response = $this
-                ->withoutMiddleware(RedirectIfInstalled::class)
+                ->withoutMiddleware([RedirectIfInstalled::class, RedirectToInstall::class])
+                ->withSession(['installer.setup_authorized' => true])
                 ->postJson(route('install.migrate.run'));
 
             $response->assertStatus(500)

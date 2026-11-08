@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Order;
 use App\Services\OrderService;
+use App\Services\WebhookHistoryService;
 use Illuminate\Http\Request;
 
 class OrderController extends Controller
@@ -67,8 +68,11 @@ class OrderController extends Controller
         // Admin can view any order (read-only); merchants see only their own.
         $this->authorizeView($request, $order);
 
+        $order->load('paymentAccount');
+        $order->setRelation('webhookLogs', app(WebhookHistoryService::class)->getAllLogsForOrder($order));
+
         return view('orders.show', [
-            'order' => $order->load('paymentAccount', 'webhookLogs'),
+            'order' => $order,
             'readOnly' => ($request->user()->isAdmin() && $order->user_id !== $request->user()->id)
                 || $order->environment === Order::SANDBOX,
         ]);

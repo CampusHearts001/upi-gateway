@@ -39,6 +39,10 @@ return [
 
     // Unofficial Paytm for Business status endpoint. It may change without notice.
     'paytm_status_url' => env('PAYTM_STATUS_URL', 'https://securegw.paytm.in/merchant-status/getTxnStatus'),
+    // Feature flag controlling the unofficial Paytm for Business integration.
+    // Defaults to true for backward compatibility. When disabled, new account creation
+    // and verifications for Paytm Business are blocked.
+    'enable_paytm_business' => (bool) env('GATEWAY_ENABLE_PAYTM_BUSINESS', true),
 
     // Official PhonePe PG (Standard Checkout v2).
     'phonepe_pg' => [

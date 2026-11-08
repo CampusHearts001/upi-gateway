@@ -5,9 +5,11 @@ use App\Http\Middleware\EnsureActive;
 use App\Http\Middleware\EnsureAdmin;
 use App\Http\Middleware\RedirectToInstall;
 use App\Http\Middleware\SecurityHeaders;
+use App\Http\Middleware\TrustConfiguredProxies;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Session\Middleware\AuthenticateSession;
 
@@ -19,6 +21,8 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->replace(TrustProxies::class, TrustConfiguredProxies::class);
+
         $middleware->alias([
             'admin' => EnsureAdmin::class,
             'active' => EnsureActive::class,

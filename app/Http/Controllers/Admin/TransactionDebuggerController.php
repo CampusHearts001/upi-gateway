@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AdminAuditLog;
 use App\Models\Order;
 use App\Models\PaymentAccount;
+use App\Services\WebhookHistoryService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -41,8 +42,8 @@ class TransactionDebuggerController extends Controller
         $order->load([
             'user:id,name,email',
             'paymentAccount:id,label,provider',
-            'webhookLogs' => fn ($query) => $query->oldest('created_at')->oldest('id'),
         ]);
+        $order->setRelation('webhookLogs', app(WebhookHistoryService::class)->getAllLogsForOrder($order));
 
         AdminAuditLog::create([
             'admin_id' => $request->user()->id,

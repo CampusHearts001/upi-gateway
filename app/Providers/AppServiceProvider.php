@@ -11,6 +11,7 @@ use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 use RuntimeException;
 
@@ -27,6 +28,8 @@ class AppServiceProvider extends ServiceProvider
             if (config('database.default') !== 'mysql') {
                 throw new RuntimeException('Production requires a MySQL database connection.');
             }
+            URL::useOrigin(config('app.url'));
+            URL::forceScheme('https');
         }
 
         // Named rate limiters are not registered here because the API throttle

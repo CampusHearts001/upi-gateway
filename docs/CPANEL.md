@@ -35,6 +35,8 @@ The installer writes `ALLOW_REGISTRATION=false`. To intentionally allow public m
 2. **PHP Extensions**: In **Select PHP Version > Extensions**, confirm that `pdo_mysql`, `openssl`, `mbstring`, `curl`, `fileinfo`, `xml`, `ctype`, and `bcmath` are enabled.
 3. **SSL Certificate**: Ensure **AutoSSL** or Let's Encrypt has issued an SSL certificate for your domain so you can run the installer over HTTPS.
 
+If the host terminates HTTPS at a reverse proxy, ask for the IP address or CIDR range of the proxy that connects directly to PHP. Set `TRUSTED_PROXIES` to only those addresses in the private `.env` file; leave it empty when PHP receives the request directly. Never set it to `*` or trust a client-supplied forwarded header. Keep `APP_URL` on the public HTTPS domain. If Cloudflare is used, restrict origin access to Cloudflare and maintain its published proxy IP ranges. After installation, verify the real client IP and the `Strict-Transport-Security` header on an HTTPS response.
+
 ---
 
 ## Step 2 — Upload application
@@ -67,6 +69,8 @@ If your hosting plan cannot point the domain's document root at `public/`, ask t
 ## Step 4 — Open the Browser Installation Wizard
 
 Navigate to `https://yourdomain.com/install` or `https://yourdomain.com/install.php` in your browser. With the document root pointed at `public/`, the latter uses `public/install.php`.
+
+On the first installer visit, open `storage/installer-setup-token` in cPanel File Manager under the private application directory. Enter the 64 characters before the colon in the database setup form. Reopen the file after each attempt because the token rotates; an expired token is refreshed when you revisit the installer. Do not place the file in `public/` or share it; the installer deletes it after successful setup.
 
 The wizard runs through 5 automated steps:
 
@@ -301,6 +305,36 @@ On shared hosting, confirm that `proc_open` and either `/proc` or `ps` are avail
 ```
 
 The command requires the numeric order database ID, exact expired execution token and generation, operator identity, and a non-empty reason. It rejects terminal orders and owners that are positively alive. For a remote node or unknown liveness, independently stop the node and also pass `--confirm-node-shutdown`. Successful recovery creates immutable database audit history. `--confirm-stopped` is an operator safety assertion, not an automatic process kill. Never use it merely because 300 seconds elapsed. If process termination is not certain, leave the lease in place and investigate; this deliberately favors preventing overlapping provider calls over availability.
+
+## Session Security & Key Rotation on cPanel
+
+### Session Encryption at Rest
+New installations generated from the `.env.example` template have `SESSION_ENCRYPT=true` enabled by default. Session payloads stored in the database `sessions` table are encrypted with AES-256-CBC using your unique `APP_KEY`. This guards against session hijacking if database backups (`.sql` dumps) or phpMyAdmin exports are accessed.
+
+### Enabling Encryption on an Existing cPanel Site
+If upgrading an existing cPanel installation that had `SESSION_ENCRYPT=false`:
+1. Note that enabling encryption invalidates active sessions on their next request. Merchants and administrators currently logged in will be prompted to re-enter their credentials. The application handles this gracefully without HTTP 500 errors.
+2. In cPanel **File Manager**, edit `/home/USERNAME/upi_gateway/.env` (enable "Show Hidden Files" in Settings).
+3. Set `SESSION_ENCRYPT=true`.
+4. In cPanel Terminal (or via SSH), clear and rebuild cache:
+   ```bash
+   php artisan config:cache
+   ```
+5. All newly written sessions are encrypted at rest immediately.
+
+### Key Rotation (`APP_PREVIOUS_KEYS`)
+If you need to rotate `APP_KEY` due to key compromise or periodic security rotation:
+1. Run `php artisan key:generate --show` in Terminal (or SSH) to generate a new key.
+2. In `.env`, assign the old key to `APP_PREVIOUS_KEYS` and the new key to `APP_KEY`:
+   ```env
+   APP_KEY=base64:NEW_KEY...
+   APP_PREVIOUS_KEYS=base64:OLD_KEY...
+   ```
+3. Run `php artisan config:cache`.
+4. Active sessions decrypt seamlessly via `APP_PREVIOUS_KEYS` and are rewritten under `APP_KEY`. After 2 hours (`SESSION_LIFETIME=120`), you can safely remove `APP_PREVIOUS_KEYS`.
+
+### Multi-Server / Cluster Consistency
+If you distribute traffic across multiple cPanel or VPS nodes sharing a central MySQL database, all servers must have the identical `APP_KEY` and cipher configuration.
 
 ## Security after installation
 

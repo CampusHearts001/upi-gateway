@@ -6,6 +6,7 @@ use App\Models\PaymentAccount;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class PaymentAccountController extends Controller
 {
@@ -19,12 +20,23 @@ class PaymentAccountController extends Controller
 
     public function create()
     {
-        return view('accounts.create', ['providers' => PaymentAccount::PROVIDERS]);
+        $providers = PaymentAccount::PROVIDERS;
+        if (! (bool) config('gateway.enable_paytm_business', true)) {
+            unset($providers['paytm_business']);
+        }
+
+        return view('accounts.create', ['providers' => $providers]);
     }
 
     public function store(Request $request)
     {
         $provider = $request->input('provider');
+        if ($provider === 'paytm_business' && ! (bool) config('gateway.enable_paytm_business', true)) {
+            throw ValidationException::withMessages([
+                'provider' => 'Paytm for Business integration is disabled by platform policy.',
+            ]);
+        }
+
         $hosted = PaymentAccount::PROVIDERS[$provider]['hosted'] ?? false;
 
         $data = $request->validate([

@@ -23,7 +23,7 @@ class InstallationManager
             return Schema::hasTable('users')
                 && DB::table('users')->where('role', 'admin')->exists();
         } catch (Throwable) {
-            return false;
+            return is_file($this->envPath());
         }
     }
 
@@ -33,7 +33,176 @@ class InstallationManager
             return true;
         }
 
+        // A lost marker must never reopen an existing installation while its
+        // database is unavailable. A fresh installation has no .env yet.
+        if (is_file($this->envPath())) {
+            try {
+                DB::connection()->getPdo();
+            } catch (Throwable) {
+                return ! $this->hasIncompleteSetup();
+            }
+        }
+
         return $this->hasAdminUser();
+    }
+
+    public function ensureSetupToken(): void
+    {
+        if (is_file($this->installedPath()) || (is_file($this->envPath()) && ! $this->hasIncompleteSetup())) {
+            return;
+        }
+        $this->withSetupLock(function (): void {
+            if (! is_file($this->envPath()) && ! $this->hasIncompleteSetup()) {
+                $this->createPrivateFile($this->inProgressPath(), bin2hex(random_bytes(32)));
+            }
+            if (! $this->hasIncompleteSetup()) {
+                return;
+            }
+            $record = $this->readTokenRecord();
+            if ($record === null || $record['expires'] <= time()) {
+                $this->writeTokenRecord();
+            }
+        });
+    }
+
+    public function validSetupToken(?string $token): bool
+    {
+        if (! is_string($token) || ! preg_match('/^[a-f0-9]{64}$/', $token)) {
+            return false;
+        }
+
+        $record = $this->readTokenRecord();
+
+        return $this->hasIncompleteSetup() && $record !== null
+            && $record['expires'] > time() && hash_equals($record['token'], $token);
+    }
+
+    public function consumeSetupToken(?string $token): bool
+    {
+        return $this->withSetupLock(function () use ($token): bool {
+            if (! $this->validSetupToken($token) || $this->isInstalled()) {
+                return false;
+            }
+            // Rotate before database work. The old value cannot be replayed;
+            // the new private value permits recovery after an interrupted request.
+            $this->writeTokenRecord();
+
+            return true;
+        });
+    }
+
+    public function hasIncompleteSetup(): bool
+    {
+        return $this->privateFileIsValid($this->inProgressPath());
+    }
+
+    private function inProgressPath(): string
+    {
+        return config('installer.in_progress_path');
+    }
+
+    private function readTokenRecord(): ?array
+    {
+        $path = $this->setupTokenPath();
+        if (! $this->privateFileIsValid($path)) {
+            return null;
+        }
+        $parts = explode(':', (string) @file_get_contents($path), 2);
+        if (count($parts) !== 2 || ! preg_match('/^[a-f0-9]{64}$/', $parts[0]) || ! ctype_digit($parts[1])) {
+            return null;
+        }
+
+        return ['token' => $parts[0], 'expires' => (int) $parts[1]];
+    }
+
+    private function writeTokenRecord(): void
+    {
+        $ttl = (int) config('installer.setup_token_ttl', 3600);
+        if ($ttl < 1) {
+            throw new RuntimeException('Installer token lifetime must be positive.');
+        }
+        $path = $this->setupTokenPath();
+        $contents = bin2hex(random_bytes(32)).':'.(time() + $ttl);
+        if (file_exists($path) || is_link($path)) {
+            if (! $this->privateFileIsValid($path)) {
+                throw new RuntimeException('Installer token file is unsafe.');
+            }
+            $temporary = $path.'.'.bin2hex(random_bytes(8));
+            $this->createPrivateFile($temporary, $contents);
+            if (! rename($temporary, $path)) {
+                @unlink($temporary);
+                throw new RuntimeException('Installer token could not be rotated.');
+            }
+        } else {
+            $this->createPrivateFile($path, $contents);
+        }
+    }
+
+    private function createPrivateFile(string $path, string $contents): void
+    {
+        $previousUmask = umask(0077);
+        try {
+            $handle = @fopen($path, 'x');
+        } finally {
+            umask($previousUmask);
+        }
+        if ($handle === false) {
+            throw new RuntimeException('Installer private file could not be created.');
+        }
+        try {
+            if (! chmod($path, 0600) || fwrite($handle, $contents) !== strlen($contents)) {
+                throw new RuntimeException('Installer private file could not be saved.');
+            }
+        } catch (Throwable $e) {
+            @unlink($path);
+            throw $e;
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    private function privateFileIsValid(string $path): bool
+    {
+        if (is_link($path) || ! is_file($path)) {
+            return false;
+        }
+        $stat = @stat($path);
+
+        return $stat !== false && ($stat['mode'] & 0777) === 0600
+            && (! function_exists('posix_geteuid') || $stat['uid'] === posix_geteuid());
+    }
+
+    private function withSetupLock(callable $callback): mixed
+    {
+        $path = config('installer.setup_lock_path');
+        if (file_exists($path) || is_link($path)) {
+            if (! $this->privateFileIsValid($path)) {
+                throw new RuntimeException('Installer lock file is unsafe.');
+            }
+        } else {
+            try {
+                $this->createPrivateFile($path, '');
+            } catch (RuntimeException $e) {
+                if (! $this->privateFileIsValid($path)) {
+                    throw $e;
+                }
+            }
+        }
+        $handle = @fopen($path, 'r+');
+        if ($handle === false || ! flock($handle, LOCK_EX)) {
+            throw new RuntimeException('Installer lock could not be acquired.');
+        }
+        try {
+            return $callback();
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    public function setupTokenPath(): string
+    {
+        return config('installer.setup_token_path', storage_path('installer-setup-token'));
     }
 
     public function databaseIsMigrated(): bool
@@ -268,7 +437,7 @@ class InstallationManager
         foreach ($replacements as $key => $value) {
             $pattern = '/^'.preg_quote($key, '/').'=.*/m';
             $env = preg_match($pattern, $env)
-                ? preg_replace($pattern, "{$key}={$value}", $env)
+                ? preg_replace_callback($pattern, fn () => "{$key}={$value}", $env)
                 : rtrim($env)."\n{$key}={$value}\n";
         }
 
@@ -308,6 +477,10 @@ class InstallationManager
         }
 
         chmod($path, 0600);
+        if (is_file($this->setupTokenPath()) && ! @unlink($this->setupTokenPath())) {
+            throw new RuntimeException('The installer setup token could not be removed.');
+        }
+        @unlink($this->inProgressPath());
     }
 
     public function installedPath(): string
@@ -329,8 +502,8 @@ class InstallationManager
         return trim($matches[1], " \t\n\r\0\x0B\"");
     }
 
-    private function envValue(string $value): string
+    public function envValue(string $value): string
     {
-        return '"'.str_replace(['\\', '"'], ['\\\\', '\\"'], $value).'"';
+        return '"'.str_replace(['\\', '"', '$'], ['\\\\', '\\"', '\\$'], $value).'"';
     }
 }

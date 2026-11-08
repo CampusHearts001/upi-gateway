@@ -198,6 +198,7 @@ class Order extends Model
             'amount' => $this->amount,
             'currency' => 'INR',
             'status' => $this->status,
+            'verified_by' => $this->verified_by,
             'environment' => $this->environment,
             'test' => $this->environment === self::SANDBOX,
             'utr' => $this->utr,

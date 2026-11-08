@@ -351,10 +351,16 @@ Artisan::command('webhooks:retry {eventId}', function (string $eventId) {
 
         return 1;
     }
+    if ($event->payload === null) {
+        $this->error("Payload is offloaded. Run 'php artisan webhooks:restore-payload {$eventId}' first.");
+
+        return 1;
+    }
     // Do not clear active dispatcher claims. They recover on their own lease.
+    // Reset dispatch_attempts to 0 so manual retry establishes a fresh generation budget.
     $updated = WebhookOutbox::whereKey($event->id)->whereNull('delivered_at')
         ->where(fn ($q) => $q->whereNull('claimed_at')->orWhere('claimed_at', '<=', now()->subSeconds(config('webhooks.claim_seconds'))))
-        ->update(['status' => 'pending', 'available_at' => now(), 'claim_token' => null, 'claimed_at' => null]);
+        ->update(['status' => 'pending', 'available_at' => now(), 'claim_token' => null, 'claimed_at' => null, 'dispatch_attempts' => 0, 'last_error' => null]);
     if (! $updated) {
         $this->error('Event is currently claimed; try after the claim expires.');
 
@@ -367,3 +373,5 @@ Artisan::command('webhooks:retry {eventId}', function (string $eventId) {
 
 Schedule::command('webhooks:dispatch')->everyMinute()->withoutOverlapping(5);
 Schedule::command('orders:check-pending')->everyMinute()->withoutOverlapping();
+Schedule::command('webhooks:offload-payloads')->daily()->withoutOverlapping(10);
+Schedule::command('webhooks:prune-logs')->daily()->withoutOverlapping(10);

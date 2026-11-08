@@ -122,6 +122,28 @@ class ApiRateLimitAndProductionDefaultsTest extends TestCase
             ->assertStatus(401);
     }
 
+    public function test_failed_auth_from_shared_ip_does_not_block_valid_merchant(): void
+    {
+        config(['gateway.api_failed_auth_ip_rate_limit' => 2]);
+        $clientIp = '198.51.100.1';
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $this->withServerVariables(['REMOTE_ADDR' => $clientIp])
+                ->withHeaders(['X-Api-Key' => 'invalid-'.$attempt, 'X-Api-Secret' => 'invalid'])
+                ->postJson('/api/v1/orders', ['amount' => 100])
+                ->assertUnauthorized();
+        }
+
+        $this->withServerVariables(['REMOTE_ADDR' => $clientIp])
+            ->withHeaders(['X-Api-Key' => $this->merchant->api_key, 'X-Api-Secret' => $this->merchant->api_secret])
+            ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'SHARED-IP'])
+            ->assertCreated();
+
+        $this->withServerVariables(['REMOTE_ADDR' => $clientIp])
+            ->withHeaders(['X-Api-Key' => 'another-invalid', 'X-Api-Secret' => 'invalid'])
+            ->postJson('/api/v1/orders', ['amount' => 100])
+            ->assertTooManyRequests();
+    }
+
     public function test_valid_authentication_succeeds_and_enforces_merchant_limits(): void
     {
         config([
