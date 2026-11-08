@@ -3,10 +3,12 @@
 namespace Tests\Feature;
 
 use App\Http\Middleware\RedirectIfInstalled;
+use App\Http\Middleware\RedirectToInstall;
 use App\Models\Order;
 use App\Models\User;
 use App\Services\OrderService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\RateLimiter;
 use Tests\TestCase;
@@ -423,6 +425,113 @@ class AuthAccessControlTest extends TestCase
         );
     }
 
+    public function test_concurrent_first_failures_increment_failure_counter_atomically(): void
+    {
+        $merchant = $this->merchant();
+        $ip = '198.51.100.77';
+        $failKey = 'login_fails:'.sha1($merchant->email.'|'.$ip);
+
+        Cache::forget($failKey);
+
+        // Process 1 fails login: sets failure count to 1 via Cache::add()
+        $this->withoutMiddleware(ThrottleRequests::class)
+            ->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->post('/login', ['email' => $merchant->email, 'password' => 'wrong-pass-1'])
+            ->assertSessionHasErrors('email');
+
+        $this->assertSame(1, (int) Cache::get($failKey));
+
+        // Process 2 fails login concurrently: Cache::add() returns false because key exists,
+        // and it atomically increments to 2 via Cache::increment()
+        $this->withoutMiddleware(ThrottleRequests::class)
+            ->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->post('/login', ['email' => $merchant->email, 'password' => 'wrong-pass-2'])
+            ->assertSessionHasErrors('email');
+
+        $this->assertSame(2, (int) Cache::get($failKey));
+    }
+
+    public function test_consecutive_failed_logins_trigger_lockout_without_prepopulated_cache(): void
+    {
+        $merchant = $this->merchant();
+        $ip = '198.51.100.42';
+
+        for ($i = 1; $i <= 9; $i++) {
+            $this->withoutMiddleware(ThrottleRequests::class)
+                ->withServerVariables(['REMOTE_ADDR' => $ip])
+                ->post('/login', ['email' => $merchant->email, 'password' => 'wrong-pass-'.$i])
+                ->assertSessionHasErrors('email');
+
+            $this->assertStringContainsString(
+                'These credentials do not match our records',
+                session('errors')->first('email')
+            );
+            RateLimiter::clear('login:'.sha1($merchant->email.'|'.$ip));
+        }
+
+        // 10th failure triggers the lockout
+        $this->withoutMiddleware(ThrottleRequests::class)
+            ->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->post('/login', ['email' => $merchant->email, 'password' => 'wrong-pass-10'])
+            ->assertSessionHasErrors('email');
+
+        // Subsequent attempt with correct password is now blocked by the 15-minute lockout
+        $this->withoutMiddleware(ThrottleRequests::class)
+            ->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->post('/login', ['email' => $merchant->email, 'password' => 'password123'])
+            ->assertSessionHasErrors('email');
+
+        $this->assertStringContainsString(
+            'Too many login attempts',
+            session('errors')->first('email')
+        );
+
+        // A different merchant from the same IP is NOT locked out
+        $otherMerchant = User::create([
+            'name' => 'Different Merchant',
+            'business_name' => 'Different Store',
+            'email' => 'different@example.com',
+            'password' => 'password123',
+        ]);
+        $this->withoutMiddleware(ThrottleRequests::class)
+            ->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->post('/login', ['email' => $otherMerchant->email, 'password' => 'password123'])
+            ->assertRedirect(route('dashboard'));
+    }
+
+    public function test_route_level_throttle_blocks_excessive_rapid_login_attempts(): void
+    {
+        $ip = '198.51.100.99';
+        for ($i = 1; $i <= 10; $i++) {
+            $this->withServerVariables(['REMOTE_ADDR' => $ip])
+                ->post('/login', ['email' => 'rapid'.$i.'@example.com', 'password' => 'wrong'])
+                ->assertSessionHasErrors('email');
+        }
+
+        // 11th rapid attempt within the same minute is blocked with 429 Too Many Requests
+        $this->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->post('/login', ['email' => 'rapid11@example.com', 'password' => 'wrong'])
+            ->assertStatus(429);
+    }
+
+    public function test_login_lockout_for_one_email_does_not_lock_another_email_at_same_ip(): void
+    {
+        $locked = $this->merchant();
+        $other = User::create([
+            'name' => 'Other Merchant',
+            'business_name' => 'Other Store',
+            'email' => 'other@example.com',
+            'password' => 'password123',
+        ]);
+        Cache::put('login_lock:'.sha1($locked->email.'|127.0.0.1'), true, 900);
+
+        $this->post('/login', ['email' => $locked->email, 'password' => 'password123'])
+            ->assertSessionHasErrors('email');
+        $this->post('/login', ['email' => $other->email, 'password' => 'password123'])
+            ->assertRedirect(route('dashboard'));
+        $this->assertAuthenticatedAs($other);
+    }
+
     public function test_login_error_does_not_reveal_user_existence(): void
     {
         $this->post('/login', ['email' => 'nobody@example.com', 'password' => 'wrong'])
@@ -440,7 +549,8 @@ class AuthAccessControlTest extends TestCase
     {
         // Test the InstallController validation rules directly by bypassing
         // the RedirectIfInstalled middleware (which blocks the route in test env).
-        $this->withoutMiddleware(RedirectIfInstalled::class)
+        $this->withoutMiddleware([RedirectIfInstalled::class, RedirectToInstall::class])
+            ->withSession(['installer.setup_authorized' => true])
             ->post(route('install.admin.save'), [
                 'name' => 'Admin',
                 'email' => 'admin@example.com',
@@ -453,7 +563,8 @@ class AuthAccessControlTest extends TestCase
 
     public function test_installer_accepts_admin_password_of_10_chars(): void
     {
-        $this->withoutMiddleware(RedirectIfInstalled::class)
+        $this->withoutMiddleware([RedirectIfInstalled::class, RedirectToInstall::class])
+            ->withSession(['installer.setup_authorized' => true])
             ->post(route('install.admin.save'), [
                 'name' => 'Admin',
                 'email' => 'admin@example.com',

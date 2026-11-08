@@ -21,6 +21,9 @@
 /storage/*.key
 /storage/pail
 /storage/installed
+/storage/installer-setup-token
+/storage/installer-setup-lock
+/storage/installer-in-progress
 
 # ── Database ──────────────────────────────────────────────────────────────────
 /database/*.sqlite

@@ -12,15 +12,22 @@
         'Your reference' => [$order->client_order_id, true],
         'Environment' => [strtoupper($order->environment).($order->environment === 'sandbox' ? ' · TEST ONLY' : ''), false],
         'Payment account' => [$order->paymentAccount ? $order->paymentAccount->label.' · '.($order->paymentAccount->upi_id ?? $order->paymentAccount->providerLabel()) : 'Internal TEST simulator', false],
-        'Verification' => [$order->paymentAccount?->providerLabel() ?? 'Sandbox simulation', false],
-        'UTR' => [$order->utr, true],
-        'Customer-submitted UTR' => [$order->customer_utr ? ($order->status === 'review' ? '••••••••'.substr($order->customer_utr, -4) : $order->customer_utr).($order->utr_attempts > 1 ? " (attempt {$order->utr_attempts})" : '') : null, true],
-        'Provider txn ID' => [$order->provider_txn_id, true],
-        'Customer name' => [$order->customer_name, false],
-        'Customer mobile' => [$order->customer_mobile, false],
-        'Customer email' => [$order->customer_email, false],
-        'Note' => [$order->note, false],
+        'Verification' => [$order->verified_by === 'admin_override' ? 'Administrator override' : ($order->paymentAccount?->providerLabel() ?? 'Sandbox simulation'), false],
     ];
+
+    if ($order->verified_by === 'admin_override') {
+        $details['Admin reference'] = [$order->utr, true];
+        $details['Provider txn ID'] = [null, true];
+    } else {
+        $details['UTR'] = [$order->utr, true];
+        $details['Provider txn ID'] = [$order->provider_txn_id, true];
+    }
+
+    $details['Customer-submitted UTR'] = [$order->customer_utr ? ($order->status === 'review' ? '••••••••'.substr($order->customer_utr, -4) : $order->customer_utr).($order->utr_attempts > 1 ? " (attempt {$order->utr_attempts})" : '') : null, true];
+    $details['Customer name'] = [$order->customer_name, false];
+    $details['Customer mobile'] = [$order->customer_mobile, false];
+    $details['Customer email'] = [$order->customer_email, false];
+    $details['Note'] = [$order->note, false];
     $timeline = [['Order created', $order->created_at, 'plus', 'bg-slate-100 text-slate-600']];
     if ($order->utr_submitted_at) {
         $submittedUtrLabel = $order->status === 'review' ? '••••••••'.substr($order->customer_utr, -4) : $order->customer_utr;
@@ -32,13 +39,22 @@
     if ($order->status === 'review') {
         $timeline[] = ['Waiting for your review', null, 'shield', 'bg-sky-100 text-sky-700'];
     } elseif ($order->status === 'paid') {
-        $timeline[] = ['Payment received'.match ($order->verified_by) { 'manual' => ' (marked manually)', 'utr_review' => ' (UTR matched)', 'sandbox' => ' (TEST simulation)', default => ' (auto verified)' }, $order->paid_at, 'check', 'bg-emerald-100 text-emerald-700'];
+        $timeline[] = ['Payment received'.match ($order->verified_by) { 'admin_override' => ' (admin override)', 'manual' => ' (marked manually)', 'utr_review' => ' (UTR matched)', 'sandbox' => ' (TEST simulation)', default => ' (auto verified)' }, $order->paid_at, 'check', 'bg-emerald-100 text-emerald-700'];
     } elseif ($order->status === 'failed') {
         $timeline[] = ['TEST payment failed', $order->sandbox_simulated_at, 'x', 'bg-red-100 text-red-700'];
     } elseif ($order->status === 'expired') {
         $timeline[] = ['Link expired without payment', $order->expires_at, 'clock', 'bg-slate-100 text-slate-500'];
     } else {
         $timeline[] = ['Waiting for payment · '.($order->expires_at ? 'expires '.$order->expires_at->diffForHumans() : 'expiry not recorded'), null, 'clock', 'bg-amber-100 text-amber-700'];
+    }
+
+    $competingReviewOrders = collect();
+    if ($order->status === 'review' && $order->customer_utr) {
+        $competingReviewOrders = \App\Models\Order::where('user_id', $order->user_id)
+            ->whereKeyNot($order->id)
+            ->where('status', 'review')
+            ->where('customer_utr', $order->customer_utr)
+            ->get();
     }
 @endphp
 
@@ -49,6 +65,50 @@
 @section('content')
 @if ($order->environment === 'sandbox')
     <div class="mb-6 rounded-xl bg-amber-100 px-5 py-4 text-sm font-semibold text-amber-900 ring-1 ring-amber-300">SANDBOX · TEST TRANSACTION · This order never contacts a real payment provider.</div>
+@endif
+@if ($order->verified_by === 'admin_override')
+    <div class="mb-6 rounded-xl bg-amber-50 px-5 py-4 text-sm text-amber-900 ring-1 ring-amber-200">
+        <div class="flex items-start gap-3">
+            <x-icon name="alert" class="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+                <span class="font-bold">Administrator Override Notice</span>
+                <p class="mt-0.5 text-amber-800 leading-relaxed">This payment was marked as paid through a platform administrator override. Please review your records before fulfilling the order.</p>
+            </div>
+        </div>
+    </div>
+@endif
+@if ($competingReviewOrders->isNotEmpty())
+    <div class="mb-6 rounded-xl bg-red-50 p-5 text-red-900 ring-1 ring-red-300">
+        <div class="flex items-start gap-3">
+            <x-icon name="alert" class="w-6 h-6 text-red-600 shrink-0 mt-0.5" />
+            <div class="flex-1">
+                <div class="font-bold text-base text-red-950">Potential UTR Collision / Duplicate Submission Detected</div>
+                <p class="mt-1 text-sm text-red-800 leading-relaxed">
+                    Multiple orders are currently in review claiming this same UTR (<span class="font-mono font-semibold">••••••••{{ substr($order->customer_utr, -4) }}</span>). Verify customer identity and check official bank records carefully before approving.
+                </p>
+                <div class="mt-3 divide-y divide-red-200/60 rounded-lg bg-white/70 p-3 ring-1 ring-red-200 text-xs">
+                    <div class="font-semibold text-red-900 mb-1">Competing Orders Claiming Same UTR:</div>
+                    @foreach ($competingReviewOrders as $competing)
+                        <div class="py-2 flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                                <a href="{{ route('orders.show', $competing) }}" class="font-mono font-bold text-brand-700 hover:underline">{{ $competing->order_no }}</a>
+                                @if ($competing->client_order_id && $competing->client_order_id !== $competing->order_no)
+                                    <span class="text-slate-600 ml-1">(Ref: {{ $competing->client_order_id }})</span>
+                                @endif
+                                <span class="ml-2 font-semibold tabular-nums text-slate-800">₹{{ number_format($competing->amount, 2) }}</span>
+                                @if ($competing->customer_name)
+                                    <span class="text-slate-600 ml-1">· {{ $competing->customer_name }}</span>
+                                @endif
+                            </div>
+                            <div class="text-slate-500 whitespace-nowrap">
+                                Submitted {{ $competing->utr_submitted_at ? $competing->utr_submitted_at->format('d M Y, h:i A') : 'time not recorded' }}
+                            </div>
+                        </div>
+                    @endforeach
+                </div>
+            </div>
+        </div>
+    </div>
 @endif
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
     <div class="lg:col-span-2 space-y-6">

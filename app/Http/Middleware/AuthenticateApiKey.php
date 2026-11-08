@@ -33,14 +33,6 @@ class AuthenticateApiKey
         $failedAuthLimit = (int) config('gateway.api_failed_auth_ip_rate_limit', 30);
         $failedAuthBucket = 'api-failed-auth:'.$ip;
 
-        if (RateLimiter::tooManyAttempts($failedAuthBucket, $failedAuthLimit)) {
-            return response()->json(['message' => 'Too many failed authentication attempts. Please try again later.'], 429)
-                ->header('Retry-After', (string) RateLimiter::availableIn($failedAuthBucket))
-                ->header('X-RateLimit-Limit', (string) $failedAuthLimit)
-                ->header('X-RateLimit-Remaining', '0')
-                ->header('X-Request-Id', $requestId);
-        }
-
         $key = (string) $request->header('X-Api-Key');
         $secret = (string) $request->header('X-Api-Secret');
 
@@ -51,6 +43,13 @@ class AuthenticateApiKey
         $expectedSecret = $merchant?->{$secretColumn};
 
         if (! $merchant || ! $expectedSecret || ! hash_equals($expectedSecret, $secret)) {
+            if (RateLimiter::tooManyAttempts($failedAuthBucket, $failedAuthLimit)) {
+                return response()->json(['message' => 'Too many failed authentication attempts. Please try again later.'], 429)
+                    ->header('Retry-After', (string) RateLimiter::availableIn($failedAuthBucket))
+                    ->header('X-RateLimit-Limit', (string) $failedAuthLimit)
+                    ->header('X-RateLimit-Remaining', '0')
+                    ->header('X-Request-Id', $requestId);
+            }
             RateLimiter::hit($failedAuthBucket, 60);
 
             return response()->json(['message' => 'Invalid API key or secret.'], 401)

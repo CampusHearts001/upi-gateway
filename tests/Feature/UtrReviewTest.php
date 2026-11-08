@@ -7,6 +7,7 @@ use App\Models\Order;
 use App\Models\User;
 use App\Services\OrderService;
 use App\Services\WebhookOutboxDispatcher;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
@@ -146,20 +147,137 @@ class UtrReviewTest extends TestCase
         $first = $this->order();
         $second = $this->order();
 
-        // While the first is under review...
-        $this->post(route('pay.utr', $first), ['utr' => '412345678901']);
-        $this->post(route('pay.utr', $second), ['utr' => '412345678901'])->assertSessionHasErrors('utr');
+        // While the first is under review, second submission is permitted (anti-squatting)
+        $this->post(route('pay.utr', $first), ['utr' => '412345678901'])->assertSessionHasNoErrors();
+        $this->assertSame(Order::REVIEW, $first->fresh()->status);
 
-        // ...and after it is approved.
-        $this->actingAs($this->merchant)->post(route('orders.approve-utr', $first), [
+        $this->post(route('pay.utr', $second), ['utr' => '412345678901'])->assertSessionHasNoErrors();
+        $this->assertSame(Order::REVIEW, $second->fresh()->status);
+
+        // Merchant sees collision warning on both orders with masked UTR
+        $this->actingAs($this->merchant);
+        $this->get(route('orders.show', $first))
+            ->assertSee('Potential UTR Collision / Duplicate Submission Detected')
+            ->assertSee('••••••••8901')
+            ->assertSee($second->order_no);
+
+        $this->get(route('orders.show', $second))
+            ->assertSee('Potential UTR Collision / Duplicate Submission Detected')
+            ->assertSee('••••••••8901')
+            ->assertSee($first->order_no);
+
+        // Approving first succeeds and marks it PAID
+        $this->post(route('orders.approve-utr', $first), [
+            'bank_utr' => '412345678901',
+            'received_amount' => 499.00,
+        ])->assertSessionHasNoErrors();
+        $this->assertSame(Order::PAID, $first->fresh()->status);
+        $this->assertSame('412345678901', $first->fresh()->utr);
+
+        // Attempting to approve the second order is rejected
+        $this->post(route('orders.approve-utr', $second), [
+            'bank_utr' => '412345678901',
+            'received_amount' => 499.00,
+        ])->assertSessionHasErrors('bank_utr');
+        $this->assertSame(Order::REVIEW, $second->fresh()->status);
+
+        // Once an order is paid with that UTR, a new third order cannot submit it
+        $third = $this->order();
+        $this->post(route('pay.utr', $third), ['utr' => '412345678901'])->assertSessionHasErrors('utr');
+        $this->assertSame(Order::PENDING, $third->fresh()->status);
+
+        // Merchant can't reuse it via manual mark-paid either.
+        $this->post(route('orders.mark-paid', $third), ['utr' => '412345678901'])->assertSessionHasErrors('utr');
+        $this->assertSame(Order::PENDING, $third->fresh()->status);
+    }
+
+    public function test_different_merchants_can_use_identical_utrs(): void
+    {
+        $otherMerchant = User::create([
+            'name' => 'Priya',
+            'business_name' => 'Priya Store',
+            'email' => 'priya@example.com',
+            'password' => 'password123',
+        ]);
+        $otherMerchant->paymentAccounts()->create([
+            'provider' => 'manual',
+            'label' => 'GPay',
+            'upi_id' => 'priya@okaxis',
+            'payee_name' => 'Priya',
+        ]);
+
+        $orderA = $this->order(300.00);
+        $orderB = app(OrderService::class)->create($otherMerchant, ['amount' => 300.00]);
+
+        $this->post(route('pay.utr', $orderA), ['utr' => '777788889999'])->assertSessionHasNoErrors();
+        $this->post(route('pay.utr', $orderB), ['utr' => '777788889999'])->assertSessionHasNoErrors();
+
+        // Merchant A approves
+        $this->actingAs($this->merchant)->post(route('orders.approve-utr', $orderA), [
+            'bank_utr' => '777788889999',
+            'received_amount' => 300.00,
+        ])->assertSessionHasNoErrors();
+        $this->assertSame(Order::PAID, $orderA->fresh()->status);
+
+        // Merchant B also approves the same UTR successfully (isolated per merchant)
+        $this->flushSession();
+        $this->actingAs($otherMerchant)->post(route('orders.approve-utr', $orderB), [
+            'bank_utr' => '777788889999',
+            'received_amount' => 300.00,
+        ])->assertSessionHasNoErrors();
+        $this->assertSame(Order::PAID, $orderB->fresh()->status);
+    }
+
+    public function test_duplicate_key_violation_on_approval_is_handled_gracefully(): void
+    {
+        $order = $this->order(499.00);
+        $this->post(route('pay.utr', $order), ['utr' => '412345678901']);
+
+        Order::saving(function ($model) {
+            if ($model->isDirty('utr') && $model->utr === '412345678901' && ! isset($model->simulated_collision)) {
+                $model->simulated_collision = true;
+                throw new UniqueConstraintViolationException(
+                    'sqlite',
+                    'insert into orders...',
+                    [],
+                    new \Exception('UNIQUE constraint failed: orders.user_id, orders.utr')
+                );
+            }
+        });
+
+        $this->actingAs($this->merchant);
+        $response = $this->post(route('orders.approve-utr', $order), [
             'bank_utr' => '412345678901',
             'received_amount' => 499.00,
         ]);
-        $this->post(route('pay.utr', $second), ['utr' => '412345678901'])->assertSessionHasErrors('utr');
 
-        // Merchant can't reuse it via manual mark-paid either.
-        $this->post(route('orders.mark-paid', $second), ['utr' => '412345678901'])->assertSessionHasErrors('utr');
-        $this->assertSame(Order::PENDING, $second->fresh()->status);
+        $response->assertSessionHasErrors('bank_utr');
+        $this->assertSame(
+            'This UTR has already been confirmed on another order.',
+            session('errors')->first('bank_utr')
+        );
+    }
+
+    public function test_unrelated_unique_constraint_violation_on_approval_is_rethrown(): void
+    {
+        $order = $this->order(499.00);
+        $this->post(route('pay.utr', $order), ['utr' => '412345678901']);
+
+        Order::saving(function ($model) {
+            if ($model->isDirty('utr') && $model->utr === '412345678901' && ! isset($model->simulated_unrelated_collision)) {
+                $model->simulated_unrelated_collision = true;
+                throw new UniqueConstraintViolationException(
+                    'sqlite',
+                    'insert into orders...',
+                    [],
+                    new \Exception('UNIQUE constraint failed: orders.order_no')
+                );
+            }
+        });
+
+        $this->expectException(UniqueConstraintViolationException::class);
+
+        app(OrderService::class)->approveCustomerUtr($order->fresh(), '412345678901', 499.00);
     }
 
     public function test_customer_can_submit_utr_shortly_after_expiry_but_not_much_later(): void

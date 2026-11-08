@@ -46,10 +46,19 @@ class AuthController extends Controller
 
         if (! Auth::attempt($credentials, $request->boolean('remember'))) {
             RateLimiter::hit($rateLimitKey, 60);          // decay 1 min
-            $failures = Cache::increment($this->failCountKey($request));
+            $failKey = $this->failCountKey($request);
+            $failures = Cache::add($failKey, 1, 900)
+                ? 1
+                : (int) Cache::increment($failKey);
+
+            if ($failures === 0) {
+                Cache::put($failKey, 1, 900);
+                $failures = 1;
+            }
+
             if ($failures >= 10) {
                 Cache::put($lockKey, true, 900);          // lock 15 min
-                Cache::forget($this->failCountKey($request));
+                Cache::forget($failKey);
             }
 
             // Generic message — does not reveal whether the email exists.

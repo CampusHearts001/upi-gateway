@@ -7,6 +7,7 @@ use App\Models\AdminAuditLog;
 use App\Models\Order;
 use App\Models\User;
 use App\Services\OrderService;
+use App\Services\WebhookHistoryService;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 
@@ -92,8 +93,11 @@ class AdminController extends Controller
             'ip' => $request->ip(),
         ]);
 
+        $order->load('paymentAccount', 'user');
+        $order->setRelation('webhookLogs', app(WebhookHistoryService::class)->getAllLogsForOrder($order));
+
         return view('orders.show', [
-            'order' => $order->load('paymentAccount', 'webhookLogs', 'user'),
+            'order' => $order,
             'readOnly' => true,
         ]);
     }

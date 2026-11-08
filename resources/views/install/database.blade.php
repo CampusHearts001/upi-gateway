@@ -9,6 +9,12 @@
     @csrf
 
     <div>
+        <label class="label">One-time setup token</label>
+        <input type="password" name="setup_token" class="input" autocomplete="off" required>
+        <p class="mt-1 text-sm text-slate-500">Read <code>storage/installer-setup-token</code> using cPanel File Manager or your server shell. Enter only the 64 characters before the colon. Reopen the file after each attempt; the token rotates and expires. The file is removed after installation.</p>
+    </div>
+
+    <div>
         <label class="label">App Name</label>
         <input type="text" name="app_name" value="{{ old('app_name', 'UPI Gateway') }}" class="input" required>
     </div>

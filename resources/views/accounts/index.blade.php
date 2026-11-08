@@ -25,6 +25,12 @@
             <div class="font-semibold text-slate-900">Account rotation</div>
             <p class="text-sm text-slate-500 mt-0.5">How new orders pick a UPI account when the API doesn't send <span class="kbd">payment_account_id</span>. Accounts that reached their daily limit are skipped automatically.</p>
             <p class="text-xs text-slate-500 mt-2">{{ $activeCount }} active {{ Str::plural('account', $activeCount) }} · capacity left today: <b class="text-slate-700">{{ is_infinite($totalLeft) ? 'Unlimited' : '₹'.number_format($totalLeft, 2) }}</b></p>
+            <div class="mt-3 rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200/80 text-xs text-slate-600 space-y-1">
+                <span class="font-semibold text-slate-800">Rotation Acceptable-Use Advisory:</span>
+                <p>
+                    Account rotation is intended for legitimate operational load distribution and redundancy across your registered business payment accounts. It must not be used to bypass bank-imposed transaction limits, receiving-bank velocity limits, payment rejection, or operational account restrictions under individual bank terms of service. Each configured account must independently comply with its bank or provider conditions.
+                </p>
+            </div>
         </div>
     </div>
     <div class="flex gap-2 shrink-0">

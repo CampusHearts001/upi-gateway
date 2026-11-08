@@ -18,16 +18,27 @@ class InstallController extends Controller
 
     public function index()
     {
+        $this->installer->ensureSetupToken();
+
         return view('install.index', ['requirements' => $this->installer->checkRequirements()]);
     }
 
     public function database()
     {
+        $this->installer->ensureSetupToken();
+
         return view('install.database');
     }
 
     public function databaseSave(Request $request)
     {
+        $setupToken = $request->input('setup_token');
+        if (! $this->installer->consumeSetupToken(is_string($setupToken) ? $setupToken : null)) {
+            abort(403, 'Invalid installer setup token.');
+        }
+
+        $request->session()->regenerate();
+
         $data = $request->validate([
             'db_connection' => 'required|in:mysql',
             'db_host' => ['required', 'string', 'max:255', 'not_regex:/[\r\n]/'],
@@ -44,7 +55,7 @@ class InstallController extends Controller
         } catch (Throwable) {
             return back()
                 ->withErrors(['db_host' => 'Could not connect to the database. Check your credentials and try again.'])
-                ->withInput($request->except('db_password'));
+                ->withInput($request->except('db_password', 'setup_token'));
         }
 
         try {
@@ -57,10 +68,11 @@ class InstallController extends Controller
 
             return back()
                 ->withErrors(['app_name' => 'The environment configuration could not be saved. Check file permissions and try again.'])
-                ->withInput($request->except('db_password'));
+                ->withInput($request->except('db_password', 'setup_token'));
         }
 
         $request->session()->put('installer.database_configured', true);
+        $request->session()->put('installer.setup_authorized', true);
 
         return redirect()->route('install.migrate');
     }
@@ -80,6 +92,7 @@ class InstallController extends Controller
 
     public function migrateRun()
     {
+        abort_unless(session('installer.setup_authorized'), 403);
         try {
             $exitCode = Artisan::call('migrate', ['--force' => true]);
             $output = Artisan::output();
@@ -127,6 +140,7 @@ class InstallController extends Controller
 
     public function adminSave(Request $request)
     {
+        abort_unless($request->session()->get('installer.setup_authorized'), 403);
         if (! $this->installer->databaseIsMigrated()) {
             return redirect()->route('install.migrate')->withErrors([
                 'database' => 'Run the database migrations before creating the administrator.',
@@ -160,6 +174,8 @@ class InstallController extends Controller
         }
 
         $this->installer->markInstalled();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
         $request->session()->put('installer.completed', true);
 
         Artisan::call('config:clear');

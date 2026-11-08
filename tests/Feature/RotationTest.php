@@ -99,16 +99,76 @@ class RotationTest extends TestCase
         $this->assertSame(5, Order::where('payment_account_id', $b->id)->count());
     }
 
-    public function test_explicit_account_over_limit_or_disabled_falls_back_to_rotation(): void
+    public function test_explicit_account_disabled_is_rejected_without_fallback(): void
     {
-        $tiny = $this->account('Tiny', 50);
         $off = $this->account('Off', active: false);
         $other = $this->account('Other');
 
-        $this->order(60, ['payment_account_id' => $tiny->id])->assertCreated();
-        $this->order(60, ['payment_account_id' => $off->id])->assertCreated();
+        $this->order(60, ['payment_account_id' => $off->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('payment_account_id');
 
-        $this->assertSame(2, Order::where('payment_account_id', $other->id)->count());
+        $this->assertSame(0, Order::where('payment_account_id', $other->id)->count());
+    }
+
+    public function test_explicit_account_over_limit_is_rejected_without_fallback(): void
+    {
+        $tiny = $this->account('Tiny', 50);
+        $other = $this->account('Other');
+
+        $this->order(60, ['payment_account_id' => $tiny->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('payment_account_id');
+
+        $this->assertSame(0, Order::where('payment_account_id', $other->id)->count());
+    }
+
+    public function test_explicit_account_from_wrong_environment_is_rejected(): void
+    {
+        $sandboxAccount = $this->merchant->paymentAccounts()->create([
+            'provider' => 'phonepe_pg',
+            'label' => 'PhonePe Sandbox',
+            'payee_name' => 'Ravi',
+            'credentials' => [
+                'client_id' => 'SANDBOX_CLIENT',
+                'client_secret' => 'SECRET',
+                'client_version' => '1',
+                'environment' => 'sandbox',
+            ],
+            'is_active' => true,
+        ]);
+
+        $this->order(100, ['payment_account_id' => $sandboxAccount->id])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('payment_account_id');
+    }
+
+    public function test_account_creation_ui_renders_manual_upi_compliance_advisory(): void
+    {
+        $this->actingAs($this->merchant);
+
+        $this->get(route('accounts.create'))
+            ->assertOk()
+            ->assertSee('Commercial UPI Compliance Advisory')
+            ->assertSee('registered merchant or current-account VPA')
+            ->assertSee('personal savings-account VPAs')
+            ->assertSee('gateway does not independently verify bank account ownership')
+            ->assertSee('receiving-bank velocity limits, payment rejection, or operational account restrictions')
+            ->assertDontSee('account freezes');
+    }
+
+    public function test_account_index_ui_renders_rotation_acceptable_use_advisory(): void
+    {
+        $this->account('Active');
+        $this->actingAs($this->merchant);
+
+        $this->get(route('accounts.index'))
+            ->assertOk()
+            ->assertSee('Rotation Acceptable-Use Advisory')
+            ->assertSee('legitimate operational load distribution')
+            ->assertSee('must not be used to bypass bank-imposed transaction limits')
+            ->assertSee('receiving-bank velocity limits, payment rejection, or operational account restrictions')
+            ->assertDontSee('account freezes');
     }
 
     public function test_unknown_or_foreign_account_id_is_rejected(): void

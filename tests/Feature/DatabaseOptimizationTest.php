@@ -257,7 +257,7 @@ class DatabaseOptimizationTest extends TestCase
             ->assertJsonValidationErrors('payment_account_id');
     }
 
-    public function test_resolve_account_falls_back_to_rotation_for_inactive_account(): void
+    public function test_resolve_account_rejects_inactive_account_without_fallback(): void
     {
         $merchant = $this->merchant();
         $inactive = $merchant->paymentAccounts()->create([
@@ -265,17 +265,16 @@ class DatabaseOptimizationTest extends TestCase
             'payee_name' => 'Off', 'is_active' => false,
         ]);
 
-        // Passing an inactive account ID should fall back to the active account.
+        // Passing an inactive account ID must be rejected without fallback.
         $this->postJson('/api/v1/orders', [
             'amount' => 100,
             'client_order_id' => 'RA-3',
             'payment_account_id' => $inactive->id,
         ], ['X-Api-Key' => $merchant->api_key, 'X-Api-Secret' => $merchant->api_secret, 'Accept' => 'application/json'])
-            ->assertCreated();
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('payment_account_id');
 
-        // Order must have been assigned to the active account, not the inactive one.
-        $order = Order::where('client_order_id', 'RA-3')->first();
-        $this->assertNotSame($inactive->id, $order->payment_account_id);
+        $this->assertNull(Order::where('client_order_id', 'RA-3')->first());
     }
 
     // ── 7. recentOrders eager-loads paymentAccount ───────────────────────────

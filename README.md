@@ -32,6 +32,18 @@
 >
 > Review the deployment guides and complete your own environment-specific testing before accepting live payments. Local automated tests and a disposable MySQL installation do not prove that every hosting provider or UPI app has been verified.
 
+## 📦 v1.1.0 Stable Release Candidate
+
+**Status:** Release candidate. A v1.1.0 Git tag and GitHub Release have not been published. Real cPanel hosting, production cron behavior, and mobile UPI app flows still require external verification.
+
+**Production ZIP:** The locally prepared distribution is `dist/upi-gateway-release-candidate.zip`; it is not committed to GitHub or available as a GitHub download. Before distributing a v1.1.0 package, rebuild it from the intended source and verify that it contains production Composer dependencies in `vendor/`, compiled assets in `public/build/`, both installer entry points, `.htaccess`, `.env.example`, and the deployment guides. Exclude `.env`, databases, logs, `node_modules/`, tests, and nested archives.
+
+**cPanel installation:** Extract the verified ZIP into a directory outside `public_html`, create a MySQL database and user, and point the domain document root to the application's `public/` directory. Open `/install` over HTTPS to complete the browser wizard. Configure the scheduler and queue-worker cron jobs described in the [cPanel installation guide](docs/CPANEL.md). The prepared package does not require Composer, Node.js, or npm on the hosting server. For an Ubuntu server, follow the [VPS guide](docs/VPS.md).
+
+**Requirements and security:** Use PHP 8.2 or newer with the extensions listed in the [installation guide](docs/INSTALLATION.md), a MySQL-compatible server through the MySQL driver, HTTPS, and writable Laravel runtime directories. The installer sets `APP_DEBUG=false` and `ALLOW_REGISTRATION=false`; keep the application and `.env` outside the public web root. Verify webhook signatures and deduplicate event IDs before fulfilling orders. Review [SECURITY.md](SECURITY.md) before accepting live payments.
+
+**GitHub Release link:** [To be added when v1.1.0 is published].
+
 ## 📖 Overview
 
 UPI Gateway is a self-hosted, multi-merchant payment management platform designed for businesses that want to integrate UPI payments into their applications.
@@ -129,9 +141,10 @@ Each merchant can configure their own UPI accounts, generate dynamic payment QR 
 
 ### ⚖️ UPI Account Rotation
 - Configure multiple UPI accounts.
-- Distribute payment requests across configured accounts.
-- Account-level daily limits.
-- Merchant-specific account management.
+- Distribute payment requests across configured accounts for operational load balancing and redundancy.
+- Account-level daily limits with automatic rollover to available accounts.
+- Strict validation when `payment_account_id` is explicitly requested (never silently falls back to another account).
+- Rotation is intended for legitimate load distribution across registered business accounts and must not be used to bypass bank-imposed velocity caps or regulatory limits.
 
 ### 🧪 Live & Sandbox Environments
 - Separate Live and Sandbox credentials.
@@ -323,8 +336,23 @@ For command-line or development deployments, configure the following variables i
 | `DB_USERNAME` | Database username | db_user |
 | `DB_PASSWORD` | Database password | Strong password |
 | `QUEUE_CONNECTION` | Queue driver | database |
+| `SESSION_DRIVER` | Session driver | database |
+| `SESSION_ENCRYPT` | Encrypt session payloads at rest in database | true |
+| `APP_PREVIOUS_KEYS` | Comma-separated previous keys for zero-downtime key rotation | base64:... |
 
 Never commit production credentials or API secrets to GitHub.
+
+### Session Encryption at Rest & Key Management
+
+- **Encrypted Session Payloads (`SESSION_ENCRYPT=true`):** New installations set `SESSION_ENCRYPT=true` in `.env.example`. When enabled, session data written to the database `sessions` table is encrypted with AES-256-CBC using `APP_KEY`. This ensures database administrators, storage backups, or query logs cannot read session attributes, CSRF tokens, or authentication states.
+- **Toggling Encryption on Existing Deployments:** Enabling `SESSION_ENCRYPT=true` on an existing deployment where sessions were previously stored in plaintext invalidates active sessions on their next HTTP request. Laravel catches decryption failures gracefully without throwing an HTTP 500 error, clearing the unencrypted session so users simply log in again.
+- **Cluster Node Consistency:** If deploying across multiple web servers behind a load balancer, all nodes must share the exact same `APP_KEY` (and `APP_PREVIOUS_KEYS`), otherwise nodes cannot decrypt session cookies or database payloads created by sibling nodes.
+- **Zero-Downtime Key Rotation (`APP_PREVIOUS_KEYS`):** When rotating `APP_KEY`, append the previous key to `APP_PREVIOUS_KEYS` in `.env` (comma-separated, e.g. `APP_PREVIOUS_KEYS=base64:oldKey...`). Laravel attempts decryption with the primary `APP_KEY` first, falling back to previous keys. On each request, active sessions are automatically re-encrypted with the new primary key upon write. Once all sessions have expired (after `SESSION_LIFETIME` minutes, default 120), remove the old key from `APP_PREVIOUS_KEYS`.
+- **Safe Migration Procedure for Existing Installations:**
+  1. Notify active merchants or schedule a maintenance window if you wish to avoid unannounced logouts.
+  2. In your server's `.env`, set `SESSION_ENCRYPT=true`.
+  3. Clear and recache configuration: `php artisan config:cache`.
+  4. Active users will be gracefully redirected to the login screen on their next request; all new sessions will be stored encrypted.
 
 Public `/register` GET and POST requests return 404 while `ALLOW_REGISTRATION=false`, and the login page hides its signup link. An administrator who intentionally wants public signup can set `ALLOW_REGISTRATION=true` in the server's private `.env` file. If configuration is cached, run `php artisan config:cache` afterward using the server's PHP CLI. Set it back to `false` and refresh the cache to close signup. Existing merchant login and administrator merchant controls remain available while signup is closed.
 
@@ -349,18 +377,23 @@ DB_PASSWORD=your_password
 
 ## 🔌 Supported Payment Integrations
 
-| Provider | Integration Type | Verification |
-|---|---|---|
-| Paytm for Business | UPI QR | Available |
-| Paytm PG | Hosted Checkout | Official API |
-| PhonePe PG | Hosted Checkout | Official API |
-| Generic UPI ID | UPI QR | Manual UTR review |
+| Provider | Integration Type | Verification | Status |
+|---|---|---|---|
+| Paytm for Business | UPI QR | Auto-polling via status endpoint | Unofficial / Experimental |
+| Paytm PG | Hosted Checkout | Signed API status check (HMAC SHA-256) | Official API |
+| PhonePe PG | Hosted Checkout | Signed OAuth API status check | Official API |
+| Generic UPI ID | UPI QR | Manual UTR submission & review | Available |
 
-**Integration notes:**
+**Integration details & security distinction:**
 
-- Paytm for Business verification currently uses an unofficial status API and may stop working without notice.
-- Paytm PG and PhonePe PG integrations depend on their respective official API credentials and merchant configurations.
-- Generic UPI accounts use manual transaction reference verification.
+- **Official Paytm PG (`paytm_pg`):** Uses official Paytm Payment Gateway APIs (`secure.paytmpayments.com`), authenticating requests with merchant keys and validating SHA-256 HMAC checksums. Recommended for all production commercial payment processing.
+- **Paytm for Business (`paytm_business`):** An unofficial integration that polls Paytm's legacy web status endpoint (`/merchant-status/getTxnStatus`). It does not verify cryptographic signatures or response checksums, and Paytm provides no SLA or API stability guarantees. Upstream changes by Paytm may degrade or terminate status checks without notice.
+- **Feature Flag (`GATEWAY_ENABLE_PAYTM_BUSINESS`):** The unofficial Paytm Business integration is governed by `GATEWAY_ENABLE_PAYTM_BUSINESS` in `.env` (defaults to `true` for backward compatibility). When set to `false`:
+  - New Paytm Business accounts and configuration updates are blocked.
+  - Existing Paytm Business accounts and encrypted credentials remain securely preserved.
+  - Ongoing verification checks return a safe disabled/pending status and will not mark orders as `PAID`.
+  - No orders or accounts are silently switched to other providers.
+- **Compliance & Account Advisory:** For commercial payment collections, merchants are strongly advised to use registered merchant/current-account VPAs or official Payment Gateway providers (Paytm PG, PhonePe PG). Personal savings-account UPI handles may be subject to bank-policy restrictions, velocity checks, and payment blocks. The gateway does not independently verify VPA ownership or legal account classification (Savings vs. Current).
 
 ---
 
@@ -439,7 +472,7 @@ Webhook events:
 - `order.pending` (Sandbox)
 - `order.timeout` (Sandbox)
 
-Each delivery includes `X-Signature: t=<unix-seconds>,v1=<hex-hmac>`, `X-Event-Id`, and `X-Event`. The HMAC-SHA256 input is the timestamp, a period, and the exact raw request body. Use the separate Live or Sandbox webhook signing secret shown in the dashboard for the corresponding environment. Reject timestamps outside a five-minute window. The current sender also supplies `X-Signature-Legacy` for older integrations; new integrations should verify `X-Signature`.
+Each delivery includes `X-Signature: t=<unix-seconds>,v1=<hex-hmac>`, `X-Event-Id`, and `X-Event`. The HMAC-SHA256 input is the timestamp, a period, and the exact raw request body. Use the separate Live or Sandbox webhook signing secret shown in the dashboard for the corresponding environment. Reject timestamps outside a five-minute window. Only timestamped `X-Signature` is sent and verified; legacy body-only signatures (`X-Signature-Legacy`) are retired and are neither sent nor accepted.
 
 Delivery is **at least once** and may arrive out of order. Store the signed body's `event_id` with a unique constraint and process each event only once. Use `event_sequence` to avoid applying an older order state after a newer one. A valid signature and recent timestamp alone do not prevent duplicate processing.
 
@@ -493,6 +526,8 @@ Before accepting production traffic:
 - Configure queue processing and scheduled tasks as required by the deployment.
 - Keep the operating system, PHP, and application dependencies updated.
 - Verify webhook signatures and handle duplicate webhook deliveries safely.
+- Keep session encryption enabled at rest (`SESSION_ENCRYPT=true`) in production.
+- Ensure all cluster nodes share the identical `APP_KEY` and maintain `APP_PREVIOUS_KEYS` during key rotation.
 
 ---
 

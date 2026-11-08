@@ -3,8 +3,13 @@
 namespace Tests\Feature;
 
 use App\Http\Middleware\RedirectIfInstalled;
+use App\Http\Middleware\RedirectToInstall;
 use App\Models\User;
 use App\Support\InstallationManager;
+use Dotenv\Loader\Loader;
+use Dotenv\Parser\Parser;
+use Dotenv\Repository\Adapter\ArrayAdapter;
+use Dotenv\Repository\RepositoryBuilder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -18,6 +23,34 @@ use Tests\TestCase;
 class InstallationWizardTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config([
+            'installer.setup_token_path' => storage_path('framework/testing/installer-token'),
+            'installer.setup_lock_path' => storage_path('framework/testing/installer-lock'),
+            'installer.in_progress_path' => storage_path('framework/testing/installer-progress'),
+        ]);
+        file_put_contents(config('installer.setup_token_path'), str_repeat('a', 64).':'.(time() + 3600));
+        file_put_contents(config('installer.in_progress_path'), str_repeat('c', 64));
+        chmod(config('installer.setup_token_path'), 0600);
+        chmod(config('installer.in_progress_path'), 0600);
+    }
+
+    protected function tearDown(): void
+    {
+        @unlink(config('installer.setup_token_path'));
+        @unlink(config('installer.setup_lock_path'));
+        @unlink(config('installer.in_progress_path'));
+        parent::tearDown();
+    }
+
+    private function authorizeSetup(): void
+    {
+        $this->withoutMiddleware(RedirectToInstall::class);
+        $this->withSession(['installer.setup_authorized' => true]);
+    }
 
     private function beginInstallation(): void
     {
@@ -51,6 +84,7 @@ class InstallationWizardTest extends TestCase
     public function test_successful_installation_creates_admin_and_disables_installer(): void
     {
         $this->beginInstallation();
+        $this->authorizeSetup();
 
         $this->get(route('install.admin'))->assertOk();
         $this->post(route('install.admin.save'), [
@@ -64,6 +98,9 @@ class InstallationWizardTest extends TestCase
         $this->assertSame('admin', $admin->role);
         $this->assertTrue(Hash::check('securepass10', $admin->password));
         $this->assertFileExists(config('installer.installed_path'));
+        $this->assertFalse(session()->has('installer.setup_authorized'));
+        $this->assertFileDoesNotExist(config('installer.setup_token_path'));
+        $this->assertFileDoesNotExist(config('installer.in_progress_path'));
 
         $this->get(route('install.done'))
             ->assertOk()
@@ -76,6 +113,7 @@ class InstallationWizardTest extends TestCase
 
     public function test_invalid_database_credentials_are_rejected_without_exposure(): void
     {
+        $this->beginInstallation();
         $secret = 'do-not-expose-this-password';
         $installer = Mockery::mock(InstallationManager::class)->makePartial();
         $installer->shouldReceive('testDatabaseConnection')
@@ -88,6 +126,7 @@ class InstallationWizardTest extends TestCase
             ->withoutMiddleware(RedirectIfInstalled::class)
             ->from(route('install.database'))
             ->post(route('install.database.save'), [
+                'setup_token' => str_repeat('a', 64),
                 'db_connection' => 'mysql',
                 'db_host' => 'db.internal',
                 'db_port' => 3306,
@@ -103,6 +142,32 @@ class InstallationWizardTest extends TestCase
             ->assertDontSee($secret)
             ->assertSessionMissing('_old_input.db_password');
         Log::shouldNotHaveReceived('error');
+    }
+
+    public function test_database_authorization_rotates_laravel_session_and_setup_token(): void
+    {
+        $this->beginInstallation();
+        $this->withoutMiddleware([RedirectIfInstalled::class, RedirectToInstall::class]);
+        $installer = Mockery::mock(InstallationManager::class)->makePartial();
+        $installer->shouldReceive('testDatabaseConnection')->once();
+        $installer->shouldReceive('writeEnvironment')->once();
+        $this->app->instance(InstallationManager::class, $installer);
+        $originalSessionId = $this->app['session']->driver()->getId();
+
+        $this->post(route('install.database.save'), [
+            'setup_token' => str_repeat('a', 64),
+            'db_connection' => 'mysql',
+            'db_host' => '127.0.0.1',
+            'db_port' => 3306,
+            'db_database' => 'gateway',
+            'db_username' => 'gateway',
+            'app_url' => 'https://gateway.example',
+            'app_name' => 'Gateway',
+        ])->assertRedirect(route('install.migrate'));
+
+        $this->assertNotSame($originalSessionId, $this->app['session']->driver()->getId());
+        $this->assertTrue(session('installer.setup_authorized'));
+        $this->assertFalse($installer->validSetupToken(str_repeat('a', 64)));
     }
 
     public function test_environment_is_written_atomically_with_a_generated_key(): void
@@ -149,9 +214,11 @@ class InstallationWizardTest extends TestCase
 
     public function test_sqlite_is_rejected_by_installer(): void
     {
+        $this->beginInstallation();
         $this->withoutMiddleware(RedirectIfInstalled::class)
             ->from(route('install.database'))
             ->post(route('install.database.save'), [
+                'setup_token' => str_repeat('a', 64),
                 'db_connection' => 'sqlite',
                 'app_url' => 'https://gateway.example',
                 'app_name' => 'Gateway',
@@ -166,6 +233,7 @@ class InstallationWizardTest extends TestCase
 
     public function test_migration_failure_is_safe_and_can_be_retried(): void
     {
+        $this->authorizeSetup();
         Log::spy();
         Artisan::shouldReceive('call')->once()->andThrow(new RuntimeException(
             'SQLSTATE failed for db.internal using very-secret-password'
@@ -231,6 +299,7 @@ class InstallationWizardTest extends TestCase
     public function test_incomplete_migrations_prevent_admin_creation(): void
     {
         $this->beginInstallation();
+        $this->authorizeSetup();
 
         // Delete the last migration record to simulate an interrupted or partial migration
         $lastMigration = DB::table('migrations')->orderByDesc('id')->first();
@@ -270,6 +339,7 @@ class InstallationWizardTest extends TestCase
     public function test_sequential_admin_creation_cannot_duplicate_or_replace_existing_admin(): void
     {
         $this->beginInstallation();
+        $this->authorizeSetup();
 
         // Step 1: Create initial admin
         $this->post(route('install.admin.save'), [
@@ -292,7 +362,7 @@ class InstallationWizardTest extends TestCase
                 'password' => 'securepass10',
                 'password_confirmation' => 'securepass10',
             ])
-            ->assertStatus(409);
+            ->assertStatus(403);
 
         $this->assertDatabaseMissing('users', ['email' => 'admin2@example.com']);
         $this->assertSame(1, User::where('role', 'admin')->count());
@@ -301,6 +371,7 @@ class InstallationWizardTest extends TestCase
     public function test_concurrent_admin_creation_is_serialized_and_rejected_by_database_guard(): void
     {
         $this->beginInstallation();
+        $this->authorizeSetup();
 
         // Simulate another concurrent process acquiring the database guard first
         DB::table('installation_guards')->insert([
@@ -319,5 +390,97 @@ class InstallationWizardTest extends TestCase
 
         $this->assertDatabaseMissing('users', ['email' => 'racing@example.com']);
         $this->assertSame(0, User::where('role', 'admin')->count());
+    }
+
+    public function test_env_value_safely_escapes_dollars_quotes_and_special_characters(): void
+    {
+        $installer = app(InstallationManager::class);
+
+        // Ordinary passwords
+        $this->assertSame('"simpleSecret123"', $installer->envValue('simpleSecret123'));
+
+        // Passwords containing $
+        $this->assertSame('"P@\$w0rd"', $installer->envValue('P@$w0rd'));
+        $this->assertSame('"P@\$\$w0rd"', $installer->envValue('P@$$w0rd'));
+        $this->assertSame('"\$"', $installer->envValue('$'));
+        $this->assertSame('"\$\$\$"', $installer->envValue('$$$'));
+
+        // Passwords containing ${VAR}
+        $this->assertSame('"P@\${APP_NAME}w0rd"', $installer->envValue('P@${APP_NAME}w0rd'));
+        $this->assertSame('"\${DB_DATABASE}"', $installer->envValue('${DB_DATABASE}'));
+
+        // Backslashes and double quotes
+        $this->assertSame('"secret\"with\"quotes"', $installer->envValue('secret"with"quotes'));
+        $this->assertSame('"pass\\\\word"', $installer->envValue('pass\\word'));
+        $this->assertSame('"\\\\\"quoted\\\\\""', $installer->envValue('\\"quoted\\"'));
+
+        // Empty and special-character values
+        $this->assertSame('""', $installer->envValue(''));
+        $this->assertSame('"!@#%^&*()_+-=[]{}|;:,.<>?/~`"', $installer->envValue('!@#%^&*()_+-=[]{}|;:,.<>?/~`'));
+        $this->assertSame('"   "', $installer->envValue('   '));
+    }
+
+    public function test_environment_writer_roundtrips_complex_passwords_without_variable_interpolation(): void
+    {
+        $installer = app(InstallationManager::class);
+        $tempEnv = tempnam(sys_get_temp_dir(), 'gateway_test_env_');
+        $originalEnvPath = config('installer.env_path');
+        $originalEnvironment = config('app.env');
+        $originalKey = config('app.key');
+        $originalDebug = config('app.debug');
+        $originalUrl = config('app.url');
+        $originalSecureCookie = config('session.secure');
+        config(['installer.env_path' => $tempEnv]);
+
+        $testPasswords = [
+            'ordinary' => 'MySecretPass123',
+            'single_dollar' => 'P@$w0rd',
+            'double_dollar' => 'P@$$w0rd',
+            'dollar_brace' => 'P@${APP_NAME}w0rd',
+            'quotes_and_slashes' => 'pass\\"word\\"with\\slashes',
+            'empty' => '',
+            'special' => '!@#%^&*()_+-=[]{}|;:,.<>?/~`',
+        ];
+
+        try {
+            foreach ($testPasswords as $case => $rawPassword) {
+                $installer->writeEnvironment([
+                    'db_connection' => 'mysql',
+                    'db_host' => '127.0.0.1',
+                    'db_port' => 3306,
+                    'db_database' => 'gateway_db',
+                    'db_username' => 'gateway_user',
+                    'db_password' => $rawPassword,
+                    'app_name' => 'InterpolationTestApp',
+                    'app_url' => 'https://gateway.example',
+                ]);
+
+                $envContent = file_get_contents($tempEnv);
+
+                // Parse with Dotenv using an isolated in-memory repository to prevent mutating global $_ENV
+                $repo = RepositoryBuilder::createWithNoAdapters()
+                    ->addAdapter(ArrayAdapter::class)
+                    ->make();
+                $entries = (new Parser)->parse($envContent);
+                (new Loader)->load($repo, $entries);
+
+                $loadedPassword = $repo->get('DB_PASSWORD');
+                $this->assertSame(
+                    $rawPassword,
+                    $loadedPassword,
+                    "Failed to round-trip password in case [{$case}]. Expected [{$rawPassword}], got [{$loadedPassword}]."
+                );
+            }
+        } finally {
+            config([
+                'installer.env_path' => $originalEnvPath,
+                'app.env' => $originalEnvironment,
+                'app.key' => $originalKey,
+                'app.debug' => $originalDebug,
+                'app.url' => $originalUrl,
+                'session.secure' => $originalSecureCookie,
+            ]);
+            @unlink($tempEnv);
+        }
     }
 }

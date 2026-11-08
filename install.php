@@ -33,6 +33,7 @@ if (session_status() === PHP_SESSION_NONE) {
 
     ini_set('session.cookie_httponly', '1');
     ini_set('session.use_only_cookies', '1');
+    ini_set('session.use_strict_mode', '1');
     if ($isHttps) {
         ini_set('session.cookie_secure', '1');
     }
@@ -60,10 +61,10 @@ if (! $alreadyInstalled && file_exists($baseDir.'/vendor/autoload.php')) {
         $installer = app(InstallationManager::class);
         if ($installer->isInstalled()) {
             $alreadyInstalled = true;
-            $installer->markInstalled();
         }
     } catch (Throwable) {
-        // If database is offline or unconfigured, we do not treat as installed unless marker exists
+        // An existing environment may belong to an installed app with an offline database.
+        $alreadyInstalled = is_file($baseDir.'/.env') && ! (isset($installer) && $installer->hasIncompleteSetup());
     }
 }
 
@@ -119,6 +120,7 @@ $app = function_exists('app') && app()->bound(Kernel::class)
 $kernel = $app->make(Kernel::class);
 $kernel->bootstrap();
 $installer = app(InstallationManager::class);
+$installer->ensureSetupToken();
 
 $step = $_GET['step'] ?? 'requirements';
 $error = null;
@@ -137,6 +139,17 @@ if ($method === 'POST') {
 }
 
 // ── 5. Action Handlers ───────────────────────────────────────────────────────
+if ($method === 'POST' && ! $error) {
+    $submittedSetupToken = $_POST['setup_token'] ?? null;
+    if ($step === 'database' && ! $installer->consumeSetupToken(is_string($submittedSetupToken) ? $submittedSetupToken : null)) {
+        http_response_code(403);
+        $error = 'Invalid installer setup token.';
+    } elseif (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_setup_authorized'])) {
+        http_response_code(403);
+        $error = 'Installer setup authorization is required.';
+    }
+}
+
 if ($method === 'POST' && ! $error) {
     if ($step === 'database') {
         $dbHost = trim($_POST['db_host'] ?? '');
@@ -189,7 +202,9 @@ if ($method === 'POST' && ! $error) {
                 ]);
 
                 Artisan::call('config:clear');
+                session_regenerate_id(true);
                 $_SESSION['_installer_db_configured'] = true;
+                $_SESSION['_installer_setup_authorized'] = true;
                 header('Location: install.php?step=migrate');
 
                 return;
@@ -231,6 +246,8 @@ if ($method === 'POST' && ! $error) {
             try {
                 $installer->createAdminUser($adminName, $adminEmail, $adminPassword);
                 $installer->markInstalled();
+                $_SESSION = [];
+                session_regenerate_id(true);
                 $_SESSION['_installer_completed'] = true;
                 header('Location: install.php?step=done');
 
@@ -348,6 +365,11 @@ $currentUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https'
             <p class="subtitle">Enter your MySQL database credentials created in cPanel MySQL Databases.</p>
             <form method="POST" action="install.php?step=database">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <div class="form-group">
+                    <label>One-time setup token</label>
+                    <input type="password" name="setup_token" autocomplete="off" required>
+                    <div class="help-text">Read storage/installer-setup-token in cPanel File Manager or your server shell. Enter only the 64 characters before the colon. Reopen the file after each attempt; the token rotates and expires.</div>
+                </div>
                 <div class="form-group">
                     <label>Application Name</label>
                     <input type="text" name="app_name" value="<?= htmlspecialchars($_POST['app_name'] ?? 'UPI Gateway', ENT_QUOTES, 'UTF-8') ?>" required>

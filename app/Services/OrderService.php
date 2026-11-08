@@ -311,6 +311,7 @@ class OrderService
                 }
 
                 if (! in_array($provider, ['paytm_business', 'paytm_pg', 'phonepe_pg'], true)
+                    || ($provider === 'paytm_business' && ! (bool) config('gateway.enable_paytm_business', true))
                     || $account->provider !== $provider
                     || $verification->paymentAccountId !== $account->id
                     || $verification->environment !== Order::LIVE
@@ -404,7 +405,11 @@ class OrderService
 
                 return true;
             });
-        } catch (UniqueConstraintViolationException) {
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isUtrUniqueConstraintViolation($e)) {
+                throw $e;
+            }
+
             // Two requests raced to use the same UTR; the unique index caught it.
             throw ValidationException::withMessages(['utr' => 'This UTR is already used on another order.']);
         }
@@ -416,48 +421,58 @@ class OrderService
 
     public function adminOverridePaid(Order $order, User $admin, string $reference, string $reason, string $ip, string $submittedAmount): Order
     {
-        DB::transaction(function () use ($order, $admin, $reference, $reason, $ip, $submittedAmount) {
-            User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
-            $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
-            $this->lockCompatibleAccount($locked);
+        try {
+            DB::transaction(function () use ($order, $admin, $reference, $reason, $ip, $submittedAmount) {
+                User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
+                $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+                $this->lockCompatibleAccount($locked);
 
-            if ($locked->environment !== Order::LIVE) {
-                throw ValidationException::withMessages(['order' => 'Only Live orders can receive an administrator override.']);
-            }
-            if ($locked->status === Order::PAID) {
-                throw ValidationException::withMessages(['order' => 'Order is already paid.']);
-            }
-            if (number_format((float) $submittedAmount, 2, '.', '') !== number_format((float) $locked->amount, 2, '.', '')) {
-                throw ValidationException::withMessages(['amount' => 'The confirmed amount must match the order amount exactly.']);
+                if ($locked->environment !== Order::LIVE) {
+                    throw ValidationException::withMessages(['order' => 'Only Live orders can receive an administrator override.']);
+                }
+                if ($locked->status === Order::PAID) {
+                    throw ValidationException::withMessages(['order' => 'Order is already paid.']);
+                }
+                if (number_format((float) $submittedAmount, 2, '.', '') !== number_format((float) $locked->amount, 2, '.', '')) {
+                    throw ValidationException::withMessages(['amount' => 'The confirmed amount must match the order amount exactly.']);
+                }
+
+                $this->ensureUtrUnused($locked, $reference);
+                $locked->forceFill([
+                    'status' => Order::PAID,
+                    'utr' => $reference,
+                    'provider_txn_id' => $reference,
+                    'verified_by' => 'admin_override',
+                    'paid_at' => now(),
+                    'review_note' => null,
+                ])->save();
+
+                AdminAuditLog::create([
+                    'admin_id' => $admin->id,
+                    'action' => 'order_manual_payment_override',
+                    'subject_type' => 'order',
+                    'subject_id' => $locked->id,
+                    'meta' => [
+                        'order_no' => $locked->order_no,
+                        'merchant_id' => $locked->user_id,
+                        'amount' => (string) $locked->amount,
+                        'verification_reference' => $reference,
+                        'reason' => $reason,
+                    ],
+                    'ip' => $ip,
+                ]);
+
+                app(WebhookOutboxService::class)->record($locked, 'order.paid');
+            });
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isUtrUniqueConstraintViolation($e)) {
+                throw $e;
             }
 
-            $this->ensureUtrUnused($locked, $reference);
-            $locked->forceFill([
-                'status' => Order::PAID,
-                'utr' => $reference,
-                'provider_txn_id' => $reference,
-                'verified_by' => 'admin_override',
-                'paid_at' => now(),
-                'review_note' => null,
-            ])->save();
-
-            AdminAuditLog::create([
-                'admin_id' => $admin->id,
-                'action' => 'order_manual_payment_override',
-                'subject_type' => 'order',
-                'subject_id' => $locked->id,
-                'meta' => [
-                    'order_no' => $locked->order_no,
-                    'merchant_id' => $locked->user_id,
-                    'amount' => (string) $locked->amount,
-                    'verification_reference' => $reference,
-                    'reason' => $reason,
-                ],
-                'ip' => $ip,
+            throw ValidationException::withMessages([
+                'verification_reference' => 'This verification reference is already used on another order.',
             ]);
-
-            app(WebhookOutboxService::class)->record($locked, 'order.paid');
-        });
+        }
 
         return $order->refresh();
     }
@@ -654,41 +669,51 @@ class OrderService
     {
         $bankUtr = $this->normalizeUtr($bankUtr);
 
-        DB::transaction(function () use ($order, $bankUtr, $receivedAmount) {
-            User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
-            // Lock the row to prevent a concurrent approve + reject race.
-            $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+        try {
+            DB::transaction(function () use ($order, $bankUtr, $receivedAmount) {
+                User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
+                // Lock the row to prevent a concurrent approve + reject race.
+                $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
 
-            if ($locked->status !== Order::REVIEW) {
-                throw ValidationException::withMessages(['bank_utr' => 'This order is not waiting for review.']);
+                if ($locked->status !== Order::REVIEW) {
+                    throw ValidationException::withMessages(['bank_utr' => 'This order is not waiting for review.']);
+                }
+
+                if (number_format($receivedAmount, 2, '.', '') !== number_format((float) $locked->amount, 2, '.', '')) {
+                    throw ValidationException::withMessages(['received_amount' => 'Received amount must match the order amount exactly.']);
+                }
+
+                if (! hash_equals((string) $locked->customer_utr, $bankUtr)) {
+                    throw ValidationException::withMessages(['bank_utr' => "UTR doesn't match what the customer submitted. Check your bank/UPI app again, or reject."]);
+                }
+
+                $this->ensureUtrUnused($locked, $bankUtr);
+
+                $locked->forceFill([
+                    'status' => Order::PAID,
+                    'utr' => $bankUtr,
+                    'verified_by' => 'utr_review',
+                    'paid_at' => now(),
+                    'review_note' => null,
+                    'verification_token' => null,
+                    'verification_expires_at' => null,
+                    'verification_pid' => null,
+                    'verification_node_id' => null,
+                    'verification_node_instance_id' => null,
+                    'verification_process_identity' => null,
+                ])->save();
+
+                app(WebhookOutboxService::class)->record($locked, 'order.paid');
+            });
+        } catch (UniqueConstraintViolationException $e) {
+            if (! $this->isUtrUniqueConstraintViolation($e)) {
+                throw $e;
             }
 
-            if (number_format($receivedAmount, 2, '.', '') !== number_format((float) $locked->amount, 2, '.', '')) {
-                throw ValidationException::withMessages(['received_amount' => 'Received amount must match the order amount exactly.']);
-            }
-
-            if (! hash_equals((string) $locked->customer_utr, $bankUtr)) {
-                throw ValidationException::withMessages(['bank_utr' => "UTR doesn't match what the customer submitted. Check your bank/UPI app again, or reject."]);
-            }
-
-            $this->ensureUtrUnused($locked, $bankUtr);
-
-            $locked->forceFill([
-                'status' => Order::PAID,
-                'utr' => $bankUtr,
-                'verified_by' => 'utr_review',
-                'paid_at' => now(),
-                'review_note' => null,
-                'verification_token' => null,
-                'verification_expires_at' => null,
-                'verification_pid' => null,
-                'verification_node_id' => null,
-                'verification_node_instance_id' => null,
-                'verification_process_identity' => null,
-            ])->save();
-
-            app(WebhookOutboxService::class)->record($locked, 'order.paid');
-        });
+            throw ValidationException::withMessages([
+                'bank_utr' => 'This UTR has already been confirmed on another order.',
+            ]);
+        }
 
         return $order->refresh();
     }
@@ -724,14 +749,42 @@ class OrderService
     }
 
     /**
-     * A UTR identifies one bank transfer, so it may back only one order per merchant.
+     * Check if a UniqueConstraintViolationException was specifically caused by the
+     * orders.user_id + orders.utr composite unique constraint.
+     */
+    private function isUtrUniqueConstraintViolation(UniqueConstraintViolationException $e): bool
+    {
+        $driverMessage = (string) ($e->errorInfo[2] ?? '');
+        $message = $driverMessage !== '' ? $driverMessage : $e->getMessage();
+
+        // MySQL: exact key name for unique(user_id, utr) on orders table
+        if (str_contains($message, 'orders_user_id_utr_unique')) {
+            return true;
+        }
+
+        // SQLite: exact failure of orders.user_id, orders.utr composite constraint
+        if (preg_match('/UNIQUE constraint failed:\s*orders\.user_id,\s*orders\.utr/i', $message)
+            || preg_match('/UNIQUE constraint failed:\s*orders\.utr,\s*orders\.user_id/i', $message)) {
+            return true;
+        }
+
+        // SQLite fallback if table prefix is omitted
+        if (preg_match('/UNIQUE constraint failed:\s*user_id,\s*utr/i', $message)
+            || preg_match('/UNIQUE constraint failed:\s*utr,\s*user_id/i', $message)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * A confirmed UTR identifies one bank transfer, so it may back only one order per merchant.
      */
     public function ensureUtrUnused(Order $order, string $utr): void
     {
         $taken = Order::where('user_id', $order->user_id)
             ->whereKeyNot($order->id)
-            ->where(fn ($q) => $q->where('utr', $utr)
-                ->orWhere(fn ($q) => $q->where('customer_utr', $utr)->where('status', Order::REVIEW)))
+            ->where('utr', $utr)
             ->exists();
 
         if ($taken) {
@@ -816,21 +869,17 @@ class OrderService
 
     /**
      * Pick the UPI account for a new order:
-     * - an explicit `payment_account_id` is preferred while it is active and
-     *   under its daily limit; otherwise the order falls back to rotation
-     *   (all accounts belong to the same merchant, so any of them is fine);
-     * - rotation picks among active accounts with room left today:
-     *   `random` picks any one, `default` prefers the default account.
+     * - if an explicit `payment_account_id` is supplied, that exact account must be
+     *   active, Live-compatible, and within its daily limit; it is strictly validated
+     *   and never silently falls back to rotation or another account;
+     * - when `payment_account_id` is omitted, automatic rotation selects among active
+     *   accounts with room left today: `random` picks any one, `default` prefers
+     *   the default account.
      */
     private function resolveAccount(User $merchant, float $amount, ?int $accountId): PaymentAccount
     {
-        $accounts = $merchant->paymentAccounts()->where('is_active', true)->withUsageToday()->get();
-
-        // Validate that an explicit account ID actually belongs to this merchant
-        // (IDOR guard). Use the already-loaded active collection first; only fire
-        // a second query when the ID is not in the active set (it may be inactive).
-        if ($accountId) {
-            $explicit = $merchant->paymentAccounts()->whereKey($accountId)->first();
+        if ($accountId !== null) {
+            $explicit = $merchant->paymentAccounts()->whereKey($accountId)->withUsageToday()->first();
 
             if (! $explicit) {
                 throw ValidationException::withMessages(['payment_account_id' => 'This UPI account does not exist.']);
@@ -839,14 +888,28 @@ class OrderService
             if ($explicit->paymentEnvironment() !== Order::LIVE) {
                 throw ValidationException::withMessages(['payment_account_id' => 'Live orders require a Live payment account.']);
             }
+
+            if ($explicit->provider === 'paytm_business' && ! (bool) config('gateway.enable_paytm_business', true)) {
+                throw ValidationException::withMessages(['payment_account_id' => 'Paytm for Business accounts are currently disabled by platform policy.']);
+            }
+
+            if (! $explicit->is_active) {
+                throw ValidationException::withMessages(['payment_account_id' => 'The selected payment account is currently disabled.']);
+            }
+
+            if (! $explicit->canAccept($amount)) {
+                throw ValidationException::withMessages(['payment_account_id' => 'The selected payment account has reached its daily limit for this amount.']);
+            }
+
+            return $explicit;
         }
 
-        $accounts = $accounts->filter(fn (PaymentAccount $account) => $account->paymentEnvironment() === Order::LIVE);
-
-        $requested = $accountId ? $accounts->firstWhere('id', $accountId) : null;
-        if ($requested?->canAccept($amount)) {
-            return $requested;
-        }
+        $accounts = $merchant->paymentAccounts()
+            ->where('is_active', true)
+            ->withUsageToday()
+            ->get()
+            ->filter(fn (PaymentAccount $account) => $account->paymentEnvironment() === Order::LIVE)
+            ->when(! (bool) config('gateway.enable_paytm_business', true), fn ($collection) => $collection->filter(fn (PaymentAccount $a) => $a->provider !== 'paytm_business'));
 
         if ($accounts->isEmpty()) {
             throw ValidationException::withMessages(['payment_account_id' => 'Add an active Live payment account before creating Live orders.']);

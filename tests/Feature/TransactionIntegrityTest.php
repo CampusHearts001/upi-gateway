@@ -253,14 +253,26 @@ class TransactionIntegrityTest extends TestCase
         $order1 = $this->order($merchant);
         $order2 = $this->order($merchant);
 
-        // First submission succeeds.
-        $this->post(route('pay.utr', $order1), ['utr' => '412345678901']);
+        // Anti-squatting: both submissions succeed into REVIEW without blocking each other.
+        $this->post(route('pay.utr', $order1), ['utr' => '412345678901'])->assertSessionHasNoErrors();
         $this->assertSame(Order::REVIEW, $order1->fresh()->status);
 
-        // Second submission with the same UTR must be rejected.
-        $this->post(route('pay.utr', $order2), ['utr' => '412345678901'])
-            ->assertSessionHasErrors('utr');
-        $this->assertSame(Order::PENDING, $order2->fresh()->status);
+        $this->post(route('pay.utr', $order2), ['utr' => '412345678901'])->assertSessionHasNoErrors();
+        $this->assertSame(Order::REVIEW, $order2->fresh()->status);
+
+        // But only the first approval succeeds; second approval is rejected.
+        $this->actingAs($merchant);
+        $this->post(route('orders.approve-utr', $order1), [
+            'bank_utr' => '412345678901',
+            'received_amount' => 100.00,
+        ])->assertSessionHasNoErrors();
+        $this->assertSame(Order::PAID, $order1->fresh()->status);
+
+        $this->post(route('orders.approve-utr', $order2), [
+            'bank_utr' => '412345678901',
+            'received_amount' => 100.00,
+        ])->assertSessionHasErrors('bank_utr');
+        $this->assertSame(Order::REVIEW, $order2->fresh()->status);
     }
 
     // ── 5. Paytm Business: order ID mismatch is rejected ─────────────────────
@@ -487,5 +499,57 @@ class TransactionIntegrityTest extends TestCase
         $this->assertDatabaseHas('admin_audit_logs', ['id' => $auditId, 'subject_id' => $order->id]);
         $this->assertNull(AdminAuditLog::findOrFail($auditId)->admin_id);
         $this->assertSame($admin->id, AdminAuditLog::findOrFail($auditId)->actor_admin_id);
+    }
+
+    public function test_admin_override_duplicate_reference_is_converted_to_validation_exception(): void
+    {
+        $merchant = $this->manualMerchant();
+        $admin = User::create(['name' => 'Admin', 'email' => 'override5@example.com', 'password' => 'password123', 'role' => 'admin']);
+        $order = $this->order($merchant);
+
+        Order::saving(function ($model) {
+            if ($model->isDirty('utr') && $model->utr === 'BANKREF555555' && ! isset($model->simulated_override_collision)) {
+                $model->simulated_override_collision = true;
+                throw new UniqueConstraintViolationException(
+                    'sqlite',
+                    'insert into orders...',
+                    [],
+                    new \Exception('UNIQUE constraint failed: orders.user_id, orders.utr')
+                );
+            }
+        });
+
+        try {
+            app(OrderService::class)->adminOverridePaid($order, $admin, 'BANKREF555555', 'Independent bank statement reviewed by administrator.', '127.0.0.1', '100.00');
+            $this->fail('Expected ValidationException was not thrown.');
+        } catch (ValidationException $e) {
+            $this->assertSame(
+                'This verification reference is already used on another order.',
+                $e->errors()['verification_reference'][0] ?? null
+            );
+        }
+    }
+
+    public function test_admin_override_unrelated_unique_constraint_violation_is_rethrown(): void
+    {
+        $merchant = $this->manualMerchant();
+        $admin = User::create(['name' => 'Admin', 'email' => 'override6@example.com', 'password' => 'password123', 'role' => 'admin']);
+        $order = $this->order($merchant);
+
+        Order::saving(function ($model) {
+            if ($model->isDirty('utr') && $model->utr === 'BANKREF666666' && ! isset($model->simulated_unrelated_override_collision)) {
+                $model->simulated_unrelated_override_collision = true;
+                throw new UniqueConstraintViolationException(
+                    'sqlite',
+                    'insert into orders...',
+                    [],
+                    new \Exception('UNIQUE constraint failed: orders.order_no')
+                );
+            }
+        });
+
+        $this->expectException(UniqueConstraintViolationException::class);
+
+        app(OrderService::class)->adminOverridePaid($order, $admin, 'BANKREF666666', 'Independent bank statement reviewed by administrator.', '127.0.0.1', '100.00');
     }
 }

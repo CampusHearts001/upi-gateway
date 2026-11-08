@@ -9,3 +9,12 @@
 /.github export-ignore
 CHANGELOG.md export-ignore
 .styleci.yml export-ignore
+
+# Release export exclusions (L-07)
+/upi_gateway export-ignore
+/Archive*.zip export-ignore
+"backup zip/**" export-ignore
+"backup zip" export-ignore
+/dist/** export-ignore
+/dist export-ignore
+.DS_Store export-ignore

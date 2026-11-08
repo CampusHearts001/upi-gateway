@@ -6,6 +6,8 @@ The wizard writes `ALLOW_REGISTRATION=false` to `.env`; public `/register` GET a
 
 ## Before opening `/install`
 
+On first access, the installer creates `storage/installer-setup-token` with private file permissions. Read it from the application directory using cPanel File Manager or a server shell, then enter the 64 characters before the colon on the database setup page. Reopen the file after each attempt because the token rotates; visiting the installer refreshes an expired token. Keep it private; installation removes it after the administrator is created. An existing installation stays locked during a database outage; an incomplete first-time installation can resume with its private setup state and token.
+
 Verify PHP 8.2+ and PDO, PDO MySQL, OpenSSL, mbstring, tokenizer, JSON, cURL, fileinfo, and XML. Create an empty MySQL 8.x or MariaDB 10.x/11.x database and a user able to create and alter tables. The prepared package must contain `vendor/autoload.php` and `public/build/`.
 
 The web root must be Laravel's `public/` directory. `storage/` and `bootstrap/cache/` must be writable by PHP, and the application must be able to create `.env`. Use HTTPS in production. SQLite is not supported at runtime.
@@ -43,6 +45,37 @@ Configure merchant accounts, payment accounts, webhooks, queue processing, sched
 ## Payment verification note
 
 For manual UPI accounts, a customer-submitted UTR places the order in **Review**. A matching UTR entered by a merchant is not proof of payment and does not mark a Live order as paid. Live payment completion requires trusted provider verification. A separately protected administrator override, when used, requires an exact amount confirmation, an independent verification reference, a written reason, and an append-only audit record.
+
+## Payment accounts and compliance
+
+- **Commercial UPI collections:** For business payment collections, merchants are strongly advised to configure registered merchant or current-account VPAs, or utilize official Payment Gateway integrations (PhonePe PG, Paytm PG). Personal savings-account UPI handles are intended for personal (P2P) transfers; utilizing personal accounts for commercial sales may violate bank terms of service, trigger automated velocity blocks, or result in account restrictions by the receiving bank.
+- **Account verification:** UPI Gateway routes payments and generates deep links based on merchant-supplied configuration. It does not independently verify VPA ownership, bank KYC, or legal account classification (Savings vs. Current). Merchants are solely responsible for ensuring their accounts comply with their banking partners' terms.
+- **Account rotation and limits:** Account rotation distributes incoming orders across multiple active accounts for operational load balancing, high availability, and provider redundancy. Rotation must not be used to evade bank velocity limits, split commercial turnover to bypass regulatory thresholds, or circumvent financial institution restrictions.
+- **Explicit account selection:** If an API request explicitly provides `payment_account_id`, that exact account is validated (must be active, Live-compatible, and within its daily limit). If the requested account is disabled, unavailable, or over its limit, the request is rejected with a validation error; it is never silently routed to another account.
+
+## Paytm Provider Architecture & Feature Flag
+
+The gateway supports two distinct Paytm integrations:
+
+1. **Official Paytm PG (`paytm_pg`)**: Uses official, production-grade endpoints with signed checkout sessions and SHA-256 HMAC response verification via `PaytmChecksum`. This is the recommended provider for all production commercial payment processing.
+2. **Unofficial Paytm for Business (`paytm_business`)**: Uses an unauthenticated status-polling endpoint (`https://securegw.paytm.in/merchant-status/getTxnStatus`). It does not provide cryptographic signatures, and Paytm offers no developer SLA.
+
+### Feature Flag (`GATEWAY_ENABLE_PAYTM_BUSINESS`)
+
+To control the unofficial Paytm for Business integration, configure `.env`:
+
+```dotenv
+GATEWAY_ENABLE_PAYTM_BUSINESS=true
+```
+
+- **Default:** `true` (preserves backward compatibility for existing deployments).
+- **Safe Disabling (`false`):**
+  - Rejects new Paytm Business account creation via the dashboard and API.
+  - Rejects order creation targeting Paytm Business accounts.
+  - Verification polling for existing pending orders safely returns a `disabled` pending result and will never mark orders `PAID`.
+  - Existing account records, encrypted credentials, historical orders, and audit logs remain strictly preserved.
+  - Accounts are never silently switched to other providers.
+  - Official Paytm PG (`paytm_pg`) and PhonePe PG (`phonepe_pg`) are completely isolated and unaffected.
 
 ## Payments received after expiry
 

@@ -232,7 +232,7 @@ class WebhookOutboxTest extends TestCase
         $this->assertSame($requests[0][0]->body(), $requests[1][0]->body());
         $this->assertSame($event->event_id, $requests[1][0]->header('X-Event-Id')[0]);
         $this->assertTrue(WebhookSignature::verify($requests[1][0]->body(), $requests[1][0]->header('X-Signature')[0], $this->merchant->api_secret));
-        $this->assertSame(hash_hmac('sha256', $requests[1][0]->body(), $this->merchant->api_secret), $requests[1][0]->header('X-Signature-Legacy')[0]);
+        $this->assertFalse($requests[1][0]->hasHeader('X-Signature-Legacy'));
         $this->assertSame('delivered', $event->fresh()->status);
         $this->assertNotNull($event->fresh()->delivered_at);
         $this->assertSame(2, $event->fresh()->delivery_attempts);
@@ -379,7 +379,7 @@ class WebhookOutboxTest extends TestCase
         $this->assertSame(Order::SANDBOX, $request['data']['environment']);
         $this->assertTrue($request['data']['test']);
         $this->assertTrue(WebhookSignature::verify($request->body(), $request->header('X-Signature')[0], $this->merchant->fresh()->sandbox_api_secret));
-        $this->assertSame(hash_hmac('sha256', $request->body(), $this->merchant->fresh()->sandbox_api_secret), $request->header('X-Signature-Legacy')[0]);
+        $this->assertFalse($request->hasHeader('X-Signature-Legacy'));
         $this->assertSame('delivered', $event->fresh()->status);
     }
 

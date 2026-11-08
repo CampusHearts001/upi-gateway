@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Order;
 use App\Models\WebhookOutbox;
+use App\Services\WebhookHistoryService;
 use App\Support\SafeUrl;
 use App\Support\WebhookSignature;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -70,7 +71,7 @@ class SendWebhook implements ShouldQueue
             return;
         }
 
-        $lock = Cache::lock('webhook-delivery:'.$this->outboxEventId, 60);
+        $lock = Cache::lock('webhook-delivery:'.$this->outboxEventId, (int) config('webhooks.delivery_lock_seconds', 60));
         if (! $lock->get()) {
             $this->release(30);
 
@@ -79,6 +80,11 @@ class SendWebhook implements ShouldQueue
         try {
             $outbox = WebhookOutbox::where('event_id', $this->outboxEventId)->firstOrFail();
             if ($outbox->delivered_at !== null) {
+                return;
+            }
+            if ($this->publicationGeneration !== null && (int) $this->publicationGeneration !== (int) $outbox->dispatch_attempts) {
+                // Stale publication generation replayed from failed_jobs or delayed queue.
+                // Abort before incrementing attempts or sending HTTP.
                 return;
             }
             if ($outbox->order_id !== $this->order->id) {
@@ -104,12 +110,18 @@ class SendWebhook implements ShouldQueue
     public function failed(?Throwable $exception): void
     {
         if ($this->outboxEventId !== null && $this->publicationGeneration !== null) {
+            $maxGenerations = max(1, (int) config('webhooks.max_dispatch_generations', 10));
+            $exhausted = $this->publicationGeneration >= $maxGenerations;
+            $status = $exhausted ? 'blocked' : 'failed';
+            $error = $exhausted ? 'exhausted_generations' : 'delivery_exhausted';
+            $availableAt = $exhausted ? null : now()->addSeconds(config('webhooks.failed_retry_seconds'));
+
             WebhookOutbox::where('event_id', $this->outboxEventId)->whereNull('delivered_at')
                 ->where('dispatch_attempts', $this->publicationGeneration)
                 ->whereNull('claim_token')->whereNull('claimed_at')
                 ->where('status', 'queued')->update([
-                    'status' => 'failed', 'last_error' => 'delivery_exhausted',
-                    'available_at' => now()->addSeconds(config('webhooks.failed_retry_seconds')),
+                    'status' => $status, 'last_error' => $error,
+                    'available_at' => $availableAt,
                 ]);
         }
     }
@@ -137,12 +149,9 @@ class SendWebhook implements ShouldQueue
     private function deliver(?WebhookOutbox $outbox, array $payload): void
     {
         // Receipt is historical fact, independent of today's destination or
-        // credentials. Reconcile even a previously blocked event before
+        // credentials. Reconcile across active and archived tiers before
         // considering whether another HTTP attempt is allowed.
-        if ($this->order->webhookLogs()
-            ->when($outbox !== null, fn ($q) => $q->where('event_id', $outbox->event_id),
-                fn ($q) => $q->where('event', $this->event))
-            ->where('success', true)->exists()) {
+        if (app(WebhookHistoryService::class)->hasSuccessfulLog($this->order->id, $outbox?->event_id, $this->event)) {
             $this->markDelivered($outbox);
 
             return;
@@ -209,7 +218,6 @@ class SendWebhook implements ShouldQueue
                 ->withHeaders([
                     'X-Signature' => $signed['header'],
                     'X-Signature-Timestamp' => (string) $signed['timestamp'],
-                    'X-Signature-Legacy' => $signed['legacy_signature'],
                     'X-Webhook-Timestamp' => (string) $signed['timestamp'],
                     'X-Event' => $this->event,
                     'X-Event-Id' => $payload['event_id'],

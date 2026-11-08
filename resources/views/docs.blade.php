@@ -387,7 +387,7 @@ Content-Type: application/json"])
                 <div class="mt-3 text-sm text-slate-600 space-y-1">
                     <p><strong>1. Five-minute timestamp tolerance:</strong> Reject any webhook where <code class="kbd">|current_time - timestamp| &gt; 300</code> to prevent replay attacks.</p>
                     <p><strong>2. Transactional event deduplication:</strong> Check that the signed <code class="kbd">event_id</code> (also passed in <code class="kbd">X-Event-Id</code>) has not been processed previously before fulfilling orders.</p>
-                    <p><strong>3. Backward compatibility:</strong> If you have not yet generated a dedicated webhook secret, your API secret is used as a fallback. A legacy body-only signature is also sent in <code class="kbd">X-Signature-Legacy</code>.</p>
+                    <p><strong>3. Secret fallback &amp; merchant migration deadline:</strong> If you have not yet generated a dedicated webhook secret, your API secret is used as a fallback (always signed with timestamp replay defense). Legacy body-only signatures (<code class="kbd">X-Signature-Legacy</code>) are now completely retired and are neither sent nor accepted. March 31, 2027 is the merchant migration deadline for all endpoints to verify timestamped <code class="kbd">X-Signature</code>.</p>
                 </div>
 
                 @php
