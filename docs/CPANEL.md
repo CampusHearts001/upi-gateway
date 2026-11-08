@@ -43,8 +43,17 @@ If the host terminates HTTPS at a reverse proxy, ask for the IP address or CIDR 
 
 ### Obtaining the production package
 
-#### Option A: Direct 1-Click Download (Recommended)
-Every push to `main` automatically builds, tests, and publishes a verified production package to the rolling GitHub Release. This package is completely flat and pre-bundled with all Composer `vendor/` dependencies and compiled assets in `public/build/`:
+You can obtain the ready-to-install package using any of the following methods:
+
+#### Option A: GitHub Direct 1-Click Download (Recommended for Beginners)
+The `main` branch is configured as a complete distribution containing pre-bundled `vendor/` production dependencies and compiled frontend assets in `public/build/`. Development tools, internal scripts, and test suites are automatically excluded via `.gitattributes`.
+
+1. Download directly from GitHub:
+   - Click the green **Code** button on GitHub and choose **Download ZIP**, or use the direct link: [**Download `main.zip`**](https://github.com/mynkdev-21/upi-gateway/archive/refs/heads/main.zip).
+2. Note on extraction: GitHub's native ZIP places files inside a top-level `upi-gateway-main/` folder. When you extract it in File Manager, open `upi-gateway-main/`, select all files, and click **Move** to move them into your target application or website root directory.
+
+#### Option B: Standalone Production Release Package (With SHA-256)
+Every push to `main` automatically builds, tests, and publishes a verified, flat production package to the rolling GitHub Release:
 
 1. Download the latest production package directly:
    - **Direct ZIP**: [**Download `upi-gateway-production.zip`**](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip)
@@ -55,15 +64,16 @@ Every push to `main` automatically builds, tests, and publishes a verified produ
    # Or on macOS:
    shasum -a 256 -c upi-gateway-production.zip.sha256
    ```
+3. Note on extraction: This package is completely flat and extracts directly into your target directory without an extra nested folder.
 
-#### Option B: Download via GitHub Actions Artifacts
+#### Option C: Download via GitHub Actions Artifacts
 You can also download build artifacts from any individual GitHub Actions run:
 1. Open the repository on GitHub and navigate to the **Actions** tab &rarr; [Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml).
 2. Select the latest completed run on `main`.
 3. Scroll to the **Artifacts** section at the bottom and click `upi-gateway-main-<commit>` to download.
 4. Extract the downloaded artifact bundle on your computer to reveal the inner `upi-gateway-production.zip`.
 
-#### Option C: Build locally from source
+#### Option D: Build locally from source
 If you have Git, PHP 8.2+, Composer, and Node.js installed on your machine:
 ```bash
 ./scripts/build-release.sh production HEAD releases
@@ -72,11 +82,11 @@ If you have Git, PHP 8.2+, Composer, and Node.js installed on your machine:
 ### Dedicated application directory (cPanel / aaPanel)
 1. **cPanel**:
    - In cPanel **File Manager**, create a directory outside `public_html`, e.g., `/home/ACCOUNT/upi-gateway`.
-   - Upload `upi-gateway-production.zip` and extract it directly into that directory.
+   - Upload the downloaded ZIP (`main.zip` or `upi-gateway-production.zip`) and extract it directly into that directory. If using `main.zip`, move the contents out of the extracted `upi-gateway-main/` subfolder into the application directory.
    - Set your domain's Document Root to `/home/ACCOUNT/upi-gateway/public` in **Domains** or **Subdomains**.
 2. **aaPanel / Baota (Nginx)**:
    - In aaPanel **File Manager**, navigate to your website root (e.g. `/www/wwwroot/yourdomain.com`).
-   - Upload `upi-gateway-production.zip` and click **Uncompress**. Ensure the destination is the current website root (do not extract into a subfolder).
+   - Upload the downloaded ZIP and click **Uncompress**. If using `main.zip`, move the contents out of `upi-gateway-main/` directly into the website root. Ensure all files reside in the website root (do not keep them inside a subfolder).
    - In aaPanel **Website** &rarr; Click your domain &rarr; **Site directory**:
      - Set **Site directory** to your application folder.
      - Set **Running directory** to `/public` and click **Save**. *(MANDATORY FOR SECURITY)*

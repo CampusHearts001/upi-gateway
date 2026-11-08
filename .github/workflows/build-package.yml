@@ -261,9 +261,26 @@ jobs:
           sed -i "s/__TRIGGER_SHA__/${TRIGGER_SHA}/g" release-notes.md
           sed -i "s/__SHORT_SHA__/${SHORT_SHA}/g" release-notes.md
 
-          # Configure git author for tag update
+          # Configure git author for tag update and distribution sync
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Synchronize main branch production distribution files if needed
+          echo "Checking main branch distribution synchronization..."
+          unzip -q -o "package-dist/upi-gateway-production.zip" -d . "vendor/*" "public/build/*" "bootstrap/cache/packages.php"
+          git add vendor public/build bootstrap/cache/packages.php
+          if ! git diff --cached --quiet; then
+            echo "Production dependencies or assets differ from main. Synchronizing main branch..."
+            git commit -m "chore: synchronize main branch production distribution [skip ci]"
+            git push origin main
+            TRIGGER_SHA=$(git rev-parse HEAD)
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            sed -i "s/__TRIGGER_SHA__/${TRIGGER_SHA}/g" release-notes.md
+            sed -i "s/__SHORT_SHA__/${SHORT_SHA}/g" release-notes.md
+            echo "Synchronized main branch commit: ${TRIGGER_SHA}"
+          else
+            echo "Main branch production distribution is already synchronized."
+          fi
 
           # Update or create the rolling Git tag pointing to TRIGGER_SHA
           echo "Updating Git tag ${TAG_NAME} to commit ${TRIGGER_SHA}..."

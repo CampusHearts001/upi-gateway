@@ -27,3 +27,15 @@ phpunit.xml export-ignore
 /.phpunit.cache export-ignore
 .editorconfig export-ignore
 /UPI-Gateway-Read-Only-Audit-Plan.md export-ignore
+/release-candidates/** export-ignore
+/release-candidates export-ignore
+/scripts/** export-ignore
+/scripts export-ignore
+package.json export-ignore
+package-lock.json export-ignore
+vite.config.js export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore
+node_modules export-ignore
+node_modules/** export-ignore
+*.sqlite* export-ignore

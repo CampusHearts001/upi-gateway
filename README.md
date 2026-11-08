@@ -25,19 +25,20 @@
 
 ## 🚀 One-Click Hosting Installation (cPanel / aaPanel / VPS)
 
-Download the complete, ready-to-install package generated automatically from the latest verified build of `main`. No SSH, Composer, Node.js, or terminal commands are required on your hosting server.
+You can download and deploy UPI Gateway using either of two 1-click methods. Both packages are fully self-contained and pre-bundled with production `vendor/` dependencies and compiled frontend assets in `public/build/`. **No SSH, Composer, Node.js, or terminal commands are required on your hosting server.**
 
-| Distribution Package | Direct Download Link | Integrity Checksum | Build Status |
+| Distribution Option | Direct Download Link | Integrity / Verification | Build Status |
 | :--- | :--- | :--- | :--- |
-| **Ready-to-Install Package** | [⬇️ **Download `upi-gateway-production.zip`**](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip) | [SHA-256 Checksum](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip.sha256) | [![Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml/badge.svg?branch=main)](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml) |
+| **Option A: GitHub Direct ZIP (Recommended for Beginners)** | [⬇️ **Download `main.zip`**](https://github.com/mynkdev-21/upi-gateway/archive/refs/heads/main.zip) | Click **Code → Download ZIP** or direct link. Pre-bundled runtime package straight from `main`. | [![Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml/badge.svg?branch=main)](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml) |
+| **Option B: Standalone Release Package** | [⬇️ **Download `upi-gateway-production.zip`**](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip) | Rolling production package with verified [SHA-256 Checksum](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip.sha256). | [![Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml/badge.svg?branch=main)](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml) |
 
 ### 3-Step Hosting Setup:
-1. **Download**: Click the download link above to get `upi-gateway-production.zip`.
+1. **Download**: Choose either **Option A (`main.zip`)** or **Option B (`upi-gateway-production.zip`)** from the table above.
 2. **Upload & Extract**: In your hosting File Manager (cPanel or aaPanel), upload and extract the ZIP directly into your website directory.
 3. **Install**: Set your domain's Document Root / Running Directory to `public/` and open `https://yourdomain.com/` in your browser. The web wizard will open automatically. *(Note for aaPanel/Nginx users: Setting Running Directory to `/public` is mandatory for security to prevent direct HTTP access to `.env` and application files; see the [Hosting Guide](docs/CPANEL.md).)*
 
 > [!TIP]
-> **Source Code vs. Production Package**: GitHub&rsquo;s native green &ldquo;Code &rarr; Download ZIP&rdquo; button downloads raw Git source code without `vendor/` or compiled assets. Always use the **[Download `upi-gateway-production.zip`](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip)** link above for shared hosting.
+> **Zero Build Requirements**: Both the native GitHub **Code → Download ZIP** and the **Release ZIP** include all required production PHP dependencies (`vendor/`) and compiled frontend assets (`public/build/`). Development files, test suites, and internal scripts are automatically excluded via `.gitattributes`. You can upload and install immediately without terminal access.
 
 ---
 

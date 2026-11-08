@@ -1,6 +1,20 @@
 # ── Dependencies ──────────────────────────────────────────────────────────────
-/vendor
 /node_modules
+
+# Development-only packages inside vendor (production packages are tracked)
+/vendor/fakerphp
+/vendor/hamcrest
+/vendor/laravel/pail
+/vendor/laravel/pint
+/vendor/laravel/sail
+/vendor/mockery
+/vendor/myclabs
+/vendor/nunomaduro/collision
+/vendor/phar-io
+/vendor/phpunit
+/vendor/sebastian
+/vendor/staabm
+/vendor/theseer
 
 # ── Environment ───────────────────────────────────────────────────────────────
 .env
@@ -8,7 +22,6 @@
 !.env.example
 
 # ── Build artifacts ───────────────────────────────────────────────────────────
-/public/build
 /public/hot
 /public/storage
 /build-output
