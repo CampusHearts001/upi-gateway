@@ -30,20 +30,16 @@ class InstallationWizardTest extends TestCase
         parent::setUp();
         $_SESSION = [];
         config([
-            'installer.setup_token_path' => storage_path('framework/testing/installer-token'),
             'installer.setup_lock_path' => storage_path('framework/testing/installer-lock'),
             'installer.in_progress_path' => storage_path('framework/testing/installer-progress'),
         ]);
-        file_put_contents(config('installer.setup_token_path'), str_repeat('a', 64).':'.(time() + 3600));
         file_put_contents(config('installer.in_progress_path'), str_repeat('c', 64));
-        chmod(config('installer.setup_token_path'), 0600);
         chmod(config('installer.in_progress_path'), 0600);
     }
 
     protected function tearDown(): void
     {
         $_SESSION = [];
-        @unlink(config('installer.setup_token_path'));
         @unlink(config('installer.setup_lock_path'));
         @unlink(config('installer.in_progress_path'));
         parent::tearDown();
@@ -51,7 +47,6 @@ class InstallationWizardTest extends TestCase
 
     private function authorizeSetup(): void
     {
-        $this->withoutMiddleware(RedirectToInstall::class);
         $this->withSession(['installer.setup_authorized' => true]);
     }
 
@@ -69,20 +64,20 @@ class InstallationWizardTest extends TestCase
             ->assertOk()
             ->assertSee('Server Requirements')
             ->assertSee('PDO MySQL (required)')
-            ->assertDontSee('PDO SQLite');
+            ->assertDontSee('PDO SQLite')
+            ->assertDontSee('Setup Password')
+            ->assertSee('Continue to database setup');
 
-        // Unauthorized visitor cannot view database configuration
+        // Database configuration page is accessible without password
         $this->get(route('install.database'))
-            ->assertStatus(401)
-            ->assertSee('Setup Authentication')
-            ->assertDontSee('MySQL is required');
-
-        // Authorized visitor can view database configuration
-        $this->withSession(['installer.setup_authorized' => true])
-            ->get(route('install.database'))
             ->assertOk()
             ->assertSee('MySQL is required')
-            ->assertDontSee('SQLite');
+            ->assertDontSee('SQLite')
+            ->assertDontSee('Setup Password');
+
+        // Sensitive steps require database authorization
+        $this->get(route('install.migrate'))->assertStatus(403);
+        $this->get(route('install.admin'))->assertStatus(403);
     }
 
     public function test_uninstalled_api_returns_a_generic_service_unavailable_response(): void
@@ -112,7 +107,6 @@ class InstallationWizardTest extends TestCase
         $this->assertTrue(Hash::check('securepass10', $admin->password));
         $this->assertFileExists(config('installer.installed_path'));
         $this->assertFalse(session()->has('installer.setup_authorized'));
-        $this->assertFileDoesNotExist(config('installer.setup_token_path'));
         $this->assertFileDoesNotExist(config('installer.in_progress_path'));
 
         $this->get(route('install.done'))
@@ -139,9 +133,8 @@ class InstallationWizardTest extends TestCase
             ->withoutMiddleware(RedirectIfInstalled::class)
             ->from(route('install.database'))
             ->post(route('install.database.save'), [
-                'setup_token' => str_repeat('a', 64),
                 'db_connection' => 'mysql',
-                'db_host' => 'db.internal',
+                'db_host' => '127.0.0.1',
                 'db_port' => 3306,
                 'db_database' => 'gateway',
                 'db_username' => 'gateway',
@@ -157,7 +150,7 @@ class InstallationWizardTest extends TestCase
         Log::shouldNotHaveReceived('error');
     }
 
-    public function test_database_authorization_rotates_laravel_session_and_setup_token(): void
+    public function test_database_authorization_rotates_laravel_session_and_authorizes_installer(): void
     {
         $this->beginInstallation();
         $this->withoutMiddleware([RedirectIfInstalled::class, RedirectToInstall::class]);
@@ -168,7 +161,6 @@ class InstallationWizardTest extends TestCase
         $originalSessionId = $this->app['session']->driver()->getId();
 
         $this->post(route('install.database.save'), [
-            'setup_token' => str_repeat('a', 64),
             'db_connection' => 'mysql',
             'db_host' => '127.0.0.1',
             'db_port' => 3306,
@@ -180,7 +172,6 @@ class InstallationWizardTest extends TestCase
 
         $this->assertNotSame($originalSessionId, $this->app['session']->driver()->getId());
         $this->assertTrue(session('installer.setup_authorized'));
-        $this->assertFalse($installer->validSetupToken(str_repeat('a', 64)));
     }
 
     public function test_environment_is_written_atomically_with_a_generated_key(): void
@@ -231,7 +222,6 @@ class InstallationWizardTest extends TestCase
         $this->withoutMiddleware(RedirectIfInstalled::class)
             ->from(route('install.database'))
             ->post(route('install.database.save'), [
-                'setup_token' => str_repeat('a', 64),
                 'db_connection' => 'sqlite',
                 'app_url' => 'https://gateway.example',
                 'app_name' => 'Gateway',
@@ -301,6 +291,7 @@ class InstallationWizardTest extends TestCase
     public function test_incomplete_installation_can_resume_after_migrations(): void
     {
         $this->beginInstallation();
+        $this->authorizeSetup();
 
         $this->get(route('install.admin'))
             ->assertOk()
@@ -340,6 +331,7 @@ class InstallationWizardTest extends TestCase
     public function test_missing_required_table_prevents_admin_creation(): void
     {
         $this->beginInstallation();
+        $this->authorizeSetup();
 
         Schema::dropIfExists('installation_guards');
         $this->assertFalse(app(InstallationManager::class)->databaseIsMigrated());

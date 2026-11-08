@@ -18,35 +18,18 @@ class InstallController extends Controller
 
     public function index(Request $request)
     {
-        $this->installer->ensureSetupPassword();
-        $isAuthorized = $this->installer->isRequestAuthorized($request);
+        $this->installer->ensureSetupState();
 
         return view('install.index', [
             'requirements' => $this->installer->checkRequirements(),
-            'isAuthorized' => $isAuthorized,
+            'allPassed' => $this->installer->allRequirementsPassed(),
         ]);
-    }
-
-    public function unlock(Request $request)
-    {
-        $password = $request->input('setup_password');
-        if (! $this->installer->verifySetupPassword(is_string($password) ? $password : null)) {
-            return back()->withErrors(['setup_password' => 'Invalid setup password. Check storage/installer-setup-password in File Manager.']);
-        }
-
-        $request->session()->regenerate();
-        $request->session()->put('installer.setup_authorized', true);
-
-        return redirect()->route('install.database');
     }
 
     public function database(Request $request)
     {
-        $this->installer->ensureSetupPassword();
-
-        if (! $this->installer->isRequestAuthorized($request)) {
-            return response()->view('install.auth', [], 401)
-                ->header('WWW-Authenticate', 'Basic realm="UPI Gateway Installation"');
+        if (! $this->installer->allRequirementsPassed()) {
+            return redirect()->route('install.index');
         }
 
         return view('install.database');
@@ -54,20 +37,6 @@ class InstallController extends Controller
 
     public function databaseSave(Request $request)
     {
-        $setupToken = $request->input('setup_token');
-        if ($setupToken !== null && $setupToken !== '') {
-            $isAuthorized = $this->installer->consumeSetupToken(is_string($setupToken) ? $setupToken : null);
-        } else {
-            $isAuthorized = $this->installer->isRequestAuthorized($request);
-        }
-
-        if (! $isAuthorized) {
-            abort(403, 'Installer setup authorization is required.');
-        }
-
-        $request->session()->regenerate();
-        $request->session()->put('installer.setup_authorized', true);
-
         $data = $request->validate([
             'db_connection' => 'required|in:mysql',
             'db_host' => ['required', 'string', 'max:255', 'not_regex:/[\r\n]/'],
@@ -79,12 +48,18 @@ class InstallController extends Controller
             'app_name' => ['required', 'string', 'max:100', 'not_regex:/[\r\n]/'],
         ]);
 
+        if (! $this->installer->isAllowedDatabaseHost($data['db_host'])) {
+            return back()
+                ->withErrors(['db_host' => 'Database host must be local (127.0.0.1 or localhost) for security during web installation.'])
+                ->withInput($request->except('db_password'));
+        }
+
         try {
             $this->installer->testDatabaseConnection($data);
         } catch (Throwable) {
             return back()
                 ->withErrors(['db_host' => 'Could not connect to the database. Check your credentials and try again.'])
-                ->withInput($request->except('db_password', 'setup_token'));
+                ->withInput($request->except('db_password'));
         }
 
         try {
@@ -97,17 +72,20 @@ class InstallController extends Controller
 
             return back()
                 ->withErrors(['app_name' => 'The environment configuration could not be saved. Check file permissions and try again.'])
-                ->withInput($request->except('db_password', 'setup_token'));
+                ->withInput($request->except('db_password'));
         }
 
+        $request->session()->regenerate();
         $request->session()->put('installer.database_configured', true);
         $request->session()->put('installer.setup_authorized', true);
 
         return redirect()->route('install.migrate');
     }
 
-    public function migrate()
+    public function migrate(Request $request)
     {
+        abort_unless($this->installer->isRequestAuthorized($request), 403);
+
         try {
             DB::connection()->getPdo();
         } catch (Throwable) {
@@ -119,9 +97,9 @@ class InstallController extends Controller
         return view('install.migrate');
     }
 
-    public function migrateRun()
+    public function migrateRun(Request $request)
     {
-        abort_unless(session('installer.setup_authorized'), 403);
+        abort_unless($this->installer->isRequestAuthorized($request), 403);
         try {
             $exitCode = Artisan::call('migrate', ['--force' => true]);
             $output = Artisan::output();
@@ -152,8 +130,10 @@ class InstallController extends Controller
         return response()->json(['success' => true, 'output' => $output]);
     }
 
-    public function admin()
+    public function admin(Request $request)
     {
+        abort_unless($this->installer->isRequestAuthorized($request), 403);
+
         if (! $this->installer->databaseIsMigrated()) {
             return redirect()->route('install.migrate')->withErrors([
                 'database' => 'Run the database migrations before creating the administrator.',
@@ -169,7 +149,7 @@ class InstallController extends Controller
 
     public function adminSave(Request $request)
     {
-        abort_unless($request->session()->get('installer.setup_authorized'), 403);
+        abort_unless($this->installer->isRequestAuthorized($request), 403);
         if (! $this->installer->databaseIsMigrated()) {
             return redirect()->route('install.migrate')->withErrors([
                 'database' => 'Run the database migrations before creating the administrator.',

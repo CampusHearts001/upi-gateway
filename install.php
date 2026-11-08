@@ -281,13 +281,7 @@ $app = function_exists('app') && app()->bound(Kernel::class)
 $kernel = $app->make(Kernel::class);
 $kernel->bootstrap();
 $installer = app(InstallationManager::class);
-$installer->ensureSetupPassword();
-
-// HTTP Basic Authentication detection
-$basicPassword = $installer->extractBasicAuthPassword();
-if ($basicPassword !== null && $installer->verifySetupPassword($basicPassword)) {
-    $_SESSION['_installer_setup_authorized'] = true;
-}
+$installer->ensureSetupState();
 
 $step = $_GET['step'] ?? 'requirements';
 $error = null;
@@ -306,42 +300,15 @@ if ($method === 'POST') {
 }
 
 // ── 5. Action Handlers ───────────────────────────────────────────────────────
-if ($method === 'POST' && ! $error && $step === 'unlock') {
-    $submittedPassword = $_POST['setup_password'] ?? null;
-    if ($installer->verifySetupPassword(is_string($submittedPassword) ? $submittedPassword : null)) {
-        session_regenerate_id(true);
-        $_SESSION['_installer_setup_authorized'] = true;
+if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_setup_authorized'])) {
+    if ($method === 'POST') {
+        http_response_code(403);
+        $error = 'Database setup must be completed before proceeding.';
+    } else {
         header('Location: install.php?step=database');
 
         return;
-    } else {
-        http_response_code(401);
-        header('WWW-Authenticate: Basic realm="UPI Gateway Installation"');
-        $error = 'Invalid setup password. Check storage/installer-setup-password in File Manager.';
-        $step = 'requirements';
     }
-}
-
-if ($method === 'POST' && ! $error) {
-    if ($step === 'database') {
-        $submittedSetupToken = $_POST['setup_token'] ?? null;
-        $isAuthorized = ! empty($_SESSION['_installer_setup_authorized'])
-            || ($submittedSetupToken !== null && $installer->consumeSetupToken(is_string($submittedSetupToken) ? $submittedSetupToken : null));
-
-        if (! $isAuthorized) {
-            http_response_code(403);
-            $error = 'Invalid installer setup token. Installer setup authorization is required.';
-        }
-    } elseif (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_setup_authorized'])) {
-        http_response_code(403);
-        $error = 'Installer setup authorization is required.';
-    }
-}
-
-if ($method === 'GET' && in_array($step, ['database', 'migrate', 'admin'], true) && empty($_SESSION['_installer_setup_authorized'])) {
-    http_response_code(401);
-    header('WWW-Authenticate: Basic realm="UPI Gateway Installation"');
-    $step = 'auth';
 }
 
 if ($method === 'POST' && ! $error) {
@@ -357,6 +324,8 @@ if ($method === 'POST' && ! $error) {
         // Validation
         if ($dbHost === '' || preg_match('/[\r\n]/', $dbHost)) {
             $error = 'Invalid database host.';
+        } elseif (! $installer->isAllowedDatabaseHost($dbHost)) {
+            $error = 'Database host must be local (127.0.0.1 or localhost) for security during web installation.';
         } elseif ($dbPort < 1 || $dbPort > 65535) {
             $error = 'Database port must be between 1 and 65535.';
         } elseif ($dbDatabase === '' || ! preg_match('/^[A-Za-z0-9_$-]+$/', $dbDatabase)) {
@@ -552,35 +521,10 @@ $currentUrl = $scheme.'://'.$host.$subPath;
                 <?php } ?>
             </ul>
             <?php if ($allPassed) { ?>
-                <?php if (! empty($_SESSION['_installer_setup_authorized'])) { ?>
-                    <a href="install.php?step=database" class="btn">Continue to Database Setup &rarr;</a>
-                <?php } else { ?>
-                    <form method="POST" action="install.php?step=unlock" style="margin-top: 1.5rem;">
-                        <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                        <div class="form-group">
-                            <label>Setup Password</label>
-                            <input type="password" name="setup_password" placeholder="Enter setup password" autocomplete="off" required>
-                            <div class="help-text">Read <code>storage/installer-setup-password</code> using cPanel or aaPanel File Manager to unlock installation. (HTTP Basic Auth is also supported).</div>
-                        </div>
-                        <button type="submit" class="btn">Unlock &amp; Continue to Database Setup &rarr;</button>
-                    </form>
-                <?php } ?>
+                <a href="install.php?step=database" class="btn">Continue to Database Setup &rarr;</a>
             <?php } else { ?>
                 <button disabled class="btn">Requirements Unmet &mdash; Please enable modules in cPanel</button>
             <?php } ?>
-
-        <?php } elseif ($step === 'auth') { ?>
-            <h2>Setup Authentication</h2>
-            <p class="subtitle">Enter the setup password found in <code>storage/installer-setup-password</code> in cPanel File Manager to proceed.</p>
-            <form method="POST" action="install.php?step=unlock">
-                <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                <div class="form-group">
-                    <label>Setup Password</label>
-                    <input type="password" name="setup_password" autofocus autocomplete="off" required>
-                    <div class="help-text">Read <code>storage/installer-setup-password</code> using cPanel or aaPanel File Manager. (HTTP Basic Auth is also accepted).</div>
-                </div>
-                <button type="submit" class="btn">Unlock &amp; Continue &rarr;</button>
-            </form>
 
         <?php } elseif ($step === 'database') { ?>
             <h2>Database Configuration</h2>

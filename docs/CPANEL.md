@@ -141,7 +141,7 @@ If your hosting plan cannot point the domain's document root at `public/`, ask t
 
 Navigate to `https://yourdomain.com/install` or `https://yourdomain.com/install.php` in your browser. With the document root pointed at `public/`, the latter uses `public/install.php`.
 
-For security, the uninstalled gateway is protected with a temporary Setup Password. On first access, check `storage/installer-setup-password` in cPanel File Manager under your private application directory. Enter this password to unlock configuration (or authenticate directly using your browser's HTTP Basic Auth prompt). The password remains stable throughout setup and does not rotate on database connection errors. The database setup screen requires only your standard MySQL credentials. Once setup completes, the setup password file is automatically deleted and the installer is permanently locked.
+The browser installation wizard is passwordless, secure, and beginner-friendly. On first access, simply inspect the system requirements check and click **Continue to Database Setup**. The database setup screen requires your standard MySQL credentials created in Step 3. For security on shared hosting, database connections must be local (`127.0.0.1` or `localhost`), and arbitrary visitors cannot claim the installation without valid MySQL credentials. Once setup completes, the installer is permanently locked.
 
 The wizard runs through 5 automated steps:
 

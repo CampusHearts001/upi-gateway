@@ -18,28 +18,9 @@
 
 <div class="mt-8">
     @if ($allPass)
-        @if ($isAuthorized ?? false)
-            <a href="{{ route('install.database') }}" class="btn btn-primary w-full justify-center py-2.5">
-                Continue to database setup <x-icon name="arrow-right" class="w-4 h-4" />
-            </a>
-        @else
-            <form method="POST" action="{{ route('install.unlock') }}" class="space-y-4">
-                @csrf
-                <div class="rounded-lg bg-slate-50 p-4 ring-1 ring-slate-200">
-                    <label class="label">Setup Password</label>
-                    <input type="password" name="setup_password" class="input mt-1" placeholder="Enter setup password" autocomplete="off" required>
-                    <p class="mt-1.5 text-xs text-slate-500">Read <code>storage/installer-setup-password</code> in your hosting File Manager or server shell to unlock installation. (HTTP Basic Auth is also supported).</p>
-                </div>
-                @if ($errors->has('setup_password'))
-                    <div class="rounded-lg bg-red-50 ring-1 ring-red-200 px-4 py-3 text-sm text-red-700">
-                        {{ $errors->first('setup_password') }}
-                    </div>
-                @endif
-                <button type="submit" class="btn btn-primary w-full justify-center py-2.5">
-                    Unlock &amp; Continue to database setup <x-icon name="arrow-right" class="w-4 h-4" />
-                </button>
-            </form>
-        @endif
+        <a href="{{ route('install.database') }}" class="btn btn-primary w-full justify-center py-2.5">
+            Continue to database setup <x-icon name="arrow-right" class="w-4 h-4" />
+        </a>
     @else
         <div class="flex items-start gap-2 rounded-lg bg-red-50 ring-1 ring-red-200 px-4 py-3 text-sm text-red-700">
             <x-icon name="alert" class="w-5 h-5 shrink-0" /> <span>Please fix the failing requirements and refresh this page.</span>

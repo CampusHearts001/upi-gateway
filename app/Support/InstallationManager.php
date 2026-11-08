@@ -46,7 +46,7 @@ class InstallationManager
         return $this->hasAdminUser();
     }
 
-    public function ensureSetupToken(): void
+    public function ensureSetupState(): void
     {
         if (is_file($this->installedPath()) || (is_file($this->envPath()) && ! $this->hasIncompleteSetup())) {
             return;
@@ -55,113 +55,35 @@ class InstallationManager
             if (! is_file($this->envPath()) && ! $this->hasIncompleteSetup()) {
                 $this->createPrivateFile($this->inProgressPath(), bin2hex(random_bytes(32)));
             }
-            if (! $this->hasIncompleteSetup()) {
-                return;
-            }
-            $record = $this->readTokenRecord();
-            if ($record === null || $record['expires'] <= time()) {
-                $this->writeTokenRecord();
-            }
-            $pwdPath = $this->setupPasswordPath();
-            if (! file_exists($pwdPath) || ! $this->privateFileIsValid($pwdPath)) {
-                $this->writeSetupPassword();
-            }
         });
     }
 
-    public function setupPasswordPath(): string
+    public function isLocalDatabaseHost(string $host): bool
     {
-        return config('installer.setup_password_path', storage_path('installer-setup-password'));
-    }
+        $normalized = strtolower(trim($host));
 
-    public function ensureSetupPassword(): void
-    {
-        $this->ensureSetupToken();
-    }
-
-    public function writeSetupPassword(?string $customPassword = null): string
-    {
-        $password = $customPassword ?? bin2hex(random_bytes(8));
-        $path = $this->setupPasswordPath();
-        if (file_exists($path) || is_link($path)) {
-            if (! $this->privateFileIsValid($path)) {
-                throw new RuntimeException('Installer setup password file is unsafe.');
-            }
-            $temporary = $path.'.'.bin2hex(random_bytes(8));
-            $this->createPrivateFile($temporary, $password);
-            if (! rename($temporary, $path)) {
-                @unlink($temporary);
-                throw new RuntimeException('Installer setup password could not be saved.');
-            }
-        } else {
-            $this->createPrivateFile($path, $password);
-        }
-
-        return $password;
-    }
-
-    public function getSetupPassword(): ?string
-    {
-        $path = $this->setupPasswordPath();
-        if (! $this->privateFileIsValid($path)) {
-            return null;
-        }
-        $content = @file_get_contents($path);
-        if ($content === false) {
-            return null;
-        }
-        $pwd = trim($content);
-
-        return $pwd !== '' ? $pwd : null;
-    }
-
-    public function verifySetupPassword(?string $password): bool
-    {
-        if (! is_string($password) || trim($password) === '') {
-            return false;
-        }
-        if ($this->isInstalled()) {
-            return false;
-        }
-
-        $expected = $this->getSetupPassword();
-        if ($expected !== null && hash_equals($expected, trim($password))) {
+        if (in_array($normalized, ['127.0.0.1', 'localhost', '::1', 'localhost.localdomain'], true)) {
             return true;
         }
 
-        return $this->validSetupToken($password);
+        if (str_starts_with($normalized, '/') && (str_ends_with($normalized, '.sock') || str_contains($normalized, 'mysql'))) {
+            return true;
+        }
+
+        if (filter_var($normalized, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return str_starts_with($normalized, '127.');
+        }
+
+        return false;
     }
 
-    public function extractBasicAuthPassword($request = null): ?string
+    public function isAllowedDatabaseHost(string $host): bool
     {
-        if (is_object($request) && method_exists($request, 'getPassword')) {
-            $pwd = $request->getPassword();
-            if ($pwd !== null && $pwd !== '') {
-                return (string) $pwd;
-            }
-        }
-        if (! empty($_SERVER['PHP_AUTH_PW'])) {
-            return (string) $_SERVER['PHP_AUTH_PW'];
+        if ($this->isLocalDatabaseHost($host)) {
+            return true;
         }
 
-        $header = null;
-        if (is_object($request) && method_exists($request, 'header')) {
-            $header = $request->header('Authorization') ?: $request->header('REDIRECT_HTTP_AUTHORIZATION');
-        }
-        if (! is_string($header)) {
-            $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? null;
-        }
-
-        if (is_string($header) && str_starts_with(strtolower($header), 'basic ')) {
-            $decoded = base64_decode(substr($header, 6));
-            if ($decoded !== false && str_contains($decoded, ':')) {
-                [, $pwd] = explode(':', $decoded, 2);
-
-                return $pwd;
-            }
-        }
-
-        return null;
+        return (bool) config('installer.allow_remote_db', false);
     }
 
     public function isRequestAuthorized($request = null): bool
@@ -175,54 +97,7 @@ class InstallationManager
             return true;
         }
 
-        $basicPassword = $this->extractBasicAuthPassword($request);
-        if ($basicPassword !== null && $this->verifySetupPassword($basicPassword)) {
-            if (is_object($request) && method_exists($request, 'session')) {
-                $session = $request->session();
-                if (is_object($session) && method_exists($session, 'put')) {
-                    $session->put('installer.setup_authorized', true);
-                }
-            } else {
-                $_SESSION['_installer_setup_authorized'] = true;
-            }
-
-            return true;
-        }
-
         return false;
-    }
-
-    public function validSetupToken(?string $token): bool
-    {
-        if (! is_string($token) || ! preg_match('/^[a-f0-9]{64}$/', $token)) {
-            return false;
-        }
-
-        $record = $this->readTokenRecord();
-
-        return $this->hasIncompleteSetup() && $record !== null
-            && $record['expires'] > time() && hash_equals($record['token'], $token);
-    }
-
-    public function consumeSetupToken(?string $token): bool
-    {
-        return $this->withSetupLock(function () use ($token): bool {
-            if ($this->isInstalled()) {
-                return false;
-            }
-            $pwd = $this->getSetupPassword();
-            if ($pwd !== null && is_string($token) && hash_equals($pwd, trim($token))) {
-                return true;
-            }
-            if (! $this->validSetupToken($token)) {
-                return false;
-            }
-            // Rotate before database work. The old value cannot be replayed;
-            // the new private value permits recovery after an interrupted request.
-            $this->writeTokenRecord();
-
-            return true;
-        });
     }
 
     public function hasIncompleteSetup(): bool
@@ -233,43 +108,6 @@ class InstallationManager
     private function inProgressPath(): string
     {
         return config('installer.in_progress_path');
-    }
-
-    private function readTokenRecord(): ?array
-    {
-        $path = $this->setupTokenPath();
-        if (! $this->privateFileIsValid($path)) {
-            return null;
-        }
-        $parts = explode(':', (string) @file_get_contents($path), 2);
-        if (count($parts) !== 2 || ! preg_match('/^[a-f0-9]{64}$/', $parts[0]) || ! ctype_digit($parts[1])) {
-            return null;
-        }
-
-        return ['token' => $parts[0], 'expires' => (int) $parts[1]];
-    }
-
-    private function writeTokenRecord(): void
-    {
-        $ttl = (int) config('installer.setup_token_ttl', 3600);
-        if ($ttl < 1) {
-            throw new RuntimeException('Installer token lifetime must be positive.');
-        }
-        $path = $this->setupTokenPath();
-        $contents = bin2hex(random_bytes(32)).':'.(time() + $ttl);
-        if (file_exists($path) || is_link($path)) {
-            if (! $this->privateFileIsValid($path)) {
-                throw new RuntimeException('Installer token file is unsafe.');
-            }
-            $temporary = $path.'.'.bin2hex(random_bytes(8));
-            $this->createPrivateFile($temporary, $contents);
-            if (! rename($temporary, $path)) {
-                @unlink($temporary);
-                throw new RuntimeException('Installer token could not be rotated.');
-            }
-        } else {
-            $this->createPrivateFile($path, $contents);
-        }
     }
 
     private function createPrivateFile(string $path, string $contents): void
@@ -332,11 +170,6 @@ class InstallationManager
             flock($handle, LOCK_UN);
             fclose($handle);
         }
-    }
-
-    public function setupTokenPath(): string
-    {
-        return config('installer.setup_token_path', storage_path('installer-setup-token'));
     }
 
     public function databaseIsMigrated(): bool
@@ -519,6 +352,10 @@ class InstallationManager
 
     public function testDatabaseConnection(array $data): void
     {
+        if (! $this->isAllowedDatabaseHost($data['db_host'] ?? '')) {
+            throw new RuntimeException('Database host must be local (127.0.0.1 or localhost) for security during web installation.');
+        }
+
         $originalDefault = config('database.default');
         $originalConnection = config('database.connections.mysql');
 
@@ -618,13 +455,15 @@ class InstallationManager
         }
 
         chmod($path, 0600);
-        if (is_file($this->setupTokenPath()) && ! @unlink($this->setupTokenPath())) {
-            throw new RuntimeException('The installer setup token could not be removed.');
+
+        $lockPath = config('installer.setup_lock_path', storage_path('installer-setup-lock'));
+        if (file_put_contents($lockPath, now()->toIso8601String(), LOCK_EX) !== false) {
+            @chmod($lockPath, 0600);
         }
-        if (is_file($this->setupPasswordPath()) && ! @unlink($this->setupPasswordPath())) {
-            throw new RuntimeException('The installer setup password could not be removed.');
-        }
+
         @unlink($this->inProgressPath());
+        @unlink(storage_path('installer-setup-token'));
+        @unlink(storage_path('installer-setup-password'));
     }
 
     public function installedPath(): string

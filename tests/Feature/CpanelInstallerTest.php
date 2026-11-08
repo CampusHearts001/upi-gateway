@@ -109,17 +109,7 @@ class CpanelInstallerTest extends TestCase
 
         // Verify installer error responses do not leak the secret password
         $this->removeInstallationMarker();
-        config([
-            'installer.setup_token_path' => storage_path('framework/testing/cpanel-installer-token'),
-            'installer.setup_lock_path' => storage_path('framework/testing/cpanel-installer-lock'),
-            'installer.in_progress_path' => storage_path('framework/testing/cpanel-installer-progress'),
-        ]);
-        file_put_contents(config('installer.setup_token_path'), str_repeat('b', 64).':'.(time() + 3600));
-        file_put_contents(config('installer.in_progress_path'), str_repeat('c', 64));
-        chmod(config('installer.setup_token_path'), 0600);
-        chmod(config('installer.in_progress_path'), 0600);
         $response = $this->post(route('install.database.save'), [
-            'setup_token' => str_repeat('b', 64),
             'db_connection' => 'mysql',
             'db_host' => '127.0.0.1',
             'db_port' => 65530,
@@ -133,9 +123,6 @@ class CpanelInstallerTest extends TestCase
         $response->assertSessionHasErrors('db_host');
         $response->assertDontSee($secretPassword);
         $this->assertEmpty(session('_old_input.db_password'));
-        @unlink(config('installer.setup_token_path'));
-        @unlink(config('installer.setup_lock_path'));
-        @unlink(config('installer.in_progress_path'));
     }
 
     // ── 3. Secure .env & APP_KEY Generation ──────────────────────────────────
@@ -298,66 +285,56 @@ class CpanelInstallerTest extends TestCase
         }
     }
 
-    public function test_database_save_requires_setup_token_even_with_a_valid_session(): void
+    public function test_database_save_rejects_remote_database_host_for_security(): void
     {
         $this->removeInstallationMarker();
-        $this->post('/install/database', [
+        $response = $this->from('/install/database')->post('/install/database', [
             'db_connection' => 'mysql',
-            'db_host' => '127.0.0.1',
+            'db_host' => '198.51.100.5',
             'db_port' => 3306,
             'db_database' => 'gateway',
             'db_username' => 'gateway',
+            'db_password' => 'secret123',
             'app_url' => 'https://gateway.example',
             'app_name' => 'Gateway',
-        ])->assertStatus(403);
+        ]);
+
+        $response->assertRedirect('/install/database');
+        $response->assertSessionHasErrors('db_host');
+        $errors = session('errors')->get('db_host');
+        $this->assertStringContainsString('Database host must be local', $errors[0]);
     }
 
-    public function test_fresh_setup_token_is_private_and_removed_after_installation(): void
+    public function test_unauthorized_visitor_cannot_access_migrate_or_admin_without_database_setup(): void
     {
         $this->removeInstallationMarker();
-        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(8));
-        $tokenPath = storage_path('framework/testing/setup-token-'.bin2hex(random_bytes(8)));
-        $lockPath = $tokenPath.'-lock';
-        $progressPath = $tokenPath.'-progress';
-        config([
-            'installer.env_path' => $envPath,
-            'installer.setup_token_path' => $tokenPath,
-            'installer.setup_lock_path' => $lockPath,
-            'installer.in_progress_path' => $progressPath,
-        ]);
-        $installer = app(InstallationManager::class);
 
-        try {
-            $installer->ensureSetupToken();
-            $this->assertFileExists($tokenPath);
-            $this->assertSame(0600, fileperms($tokenPath) & 0777);
-            $token = explode(':', file_get_contents($tokenPath), 2)[0];
-            $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', $token);
-            $this->assertTrue($installer->validSetupToken($token));
-            $this->assertFalse($installer->validSetupToken(str_repeat('0', 64)));
-            $installer->markInstalled();
-            $this->assertFileDoesNotExist($tokenPath);
-            $this->assertFalse($installer->validSetupToken($token));
-        } finally {
-            @unlink($tokenPath);
-            @unlink($lockPath);
-            @unlink($progressPath);
-            @unlink(config('installer.installed_path'));
-        }
+        // Direct GET to sensitive steps without authorized database session is blocked
+        $this->get('/install/migrate')->assertStatus(403);
+        $this->get('/install/admin')->assertStatus(403);
+
+        // Direct POST to sensitive steps without authorized database session is blocked
+        $this->post('/install/migrate')->assertStatus(403);
+        $this->post('/install/admin', [
+            'name' => 'Admin',
+            'email' => 'admin@example.com',
+            'password' => 'secretpass123',
+            'password_confirmation' => 'secretpass123',
+        ])->assertStatus(403);
     }
 
     public function test_incomplete_first_installation_recovers_during_database_outage_without_marking_installed(): void
     {
         $this->removeInstallationMarker();
-        $tokenPath = storage_path('framework/testing/recovery-token-'.bin2hex(random_bytes(8)));
         $envPath = sys_get_temp_dir().'/gateway-recovery-env-'.bin2hex(random_bytes(8));
         $oldDefault = config('database.default');
         $oldMysql = config('database.connections.mysql');
+        $lockPath = storage_path('framework/testing/recovery-lock-'.bin2hex(random_bytes(8)));
+        $progressPath = storage_path('framework/testing/recovery-progress-'.bin2hex(random_bytes(8)));
         config([
             'installer.env_path' => $envPath,
-            'installer.setup_token_path' => $tokenPath,
-            'installer.setup_lock_path' => $tokenPath.'-lock',
-            'installer.in_progress_path' => $tokenPath.'-progress',
+            'installer.setup_lock_path' => $lockPath,
+            'installer.in_progress_path' => $progressPath,
         ]);
         $installer = app(InstallationManager::class);
 
@@ -375,109 +352,32 @@ class CpanelInstallerTest extends TestCase
             $this->get('/install')->assertOk();
             $this->get('/install.php')->assertOk();
             $this->assertFileDoesNotExist(base_path('storage/installed'));
-            $this->assertFileExists($tokenPath);
         } finally {
             config(['database.default' => $oldDefault, 'database.connections.mysql' => $oldMysql]);
             DB::purge('mysql');
             @unlink($envPath);
-            @unlink($tokenPath);
-            @unlink($tokenPath.'-lock');
-            @unlink($tokenPath.'-progress');
+            @unlink($lockPath);
+            @unlink($progressPath);
         }
     }
 
-    public function test_setup_token_expiry_rotation_replay_and_unsafe_files_are_rejected(): void
+    public function test_local_database_host_validation_rules(): void
     {
-        $this->removeInstallationMarker();
-        $tokenPath = storage_path('framework/testing/lifecycle-token-'.bin2hex(random_bytes(8)));
-        config([
-            'installer.env_path' => sys_get_temp_dir().'/gateway-lifecycle-env-'.bin2hex(random_bytes(8)),
-            'installer.setup_token_path' => $tokenPath,
-            'installer.setup_lock_path' => $tokenPath.'-lock',
-            'installer.in_progress_path' => $tokenPath.'-progress',
-            'installer.setup_token_ttl' => 1,
-        ]);
         $installer = app(InstallationManager::class);
 
-        try {
-            $installer->ensureSetupToken();
-            $first = explode(':', file_get_contents($tokenPath), 2)[0];
-            $this->assertTrue($installer->consumeSetupToken($first));
-            $this->assertFalse($installer->consumeSetupToken($first));
-            $second = explode(':', file_get_contents($tokenPath), 2)[0];
-            $this->assertNotSame($first, $second);
-            file_put_contents($tokenPath, $second.':'.(time() - 1));
-            $this->assertFalse($installer->validSetupToken($second));
-            $installer->ensureSetupToken();
-            $this->assertNotSame($second, explode(':', file_get_contents($tokenPath), 2)[0]);
+        // Valid local hosts
+        $this->assertTrue($installer->isLocalDatabaseHost('127.0.0.1'));
+        $this->assertTrue($installer->isLocalDatabaseHost('localhost'));
+        $this->assertTrue($installer->isLocalDatabaseHost('::1'));
+        $this->assertTrue($installer->isLocalDatabaseHost('127.0.0.2'));
+        $this->assertTrue($installer->isLocalDatabaseHost('/var/run/mysqld/mysqld.sock'));
+        $this->assertTrue($installer->isLocalDatabaseHost('/tmp/mysql.sock'));
 
-            chmod($tokenPath, 0644);
-            $this->assertFalse($installer->validSetupToken(explode(':', file_get_contents($tokenPath), 2)[0]));
-            @unlink($tokenPath);
-            symlink(config('installer.in_progress_path'), $tokenPath);
-            $this->assertFalse($installer->validSetupToken(str_repeat('a', 64)));
-            $this->expectException(RuntimeException::class);
-            $installer->ensureSetupToken();
-        } finally {
-            @unlink($tokenPath);
-            @unlink($tokenPath.'-lock');
-            @unlink($tokenPath.'-progress');
-        }
-    }
-
-    public function test_concurrent_setup_token_consumption_has_one_winner(): void
-    {
-        if (DB::getDriverName() !== 'mysql' || ! function_exists('pcntl_fork')) {
-            $this->markTestSkipped('Requires MySQL and pcntl_fork for independent database connections.');
-        }
-        $this->removeInstallationMarker();
-        $tokenPath = storage_path('framework/testing/concurrent-token-'.bin2hex(random_bytes(8)));
-        $resultPath = $tokenPath.'-result';
-        config([
-            'installer.env_path' => sys_get_temp_dir().'/gateway-concurrent-env-'.bin2hex(random_bytes(8)),
-            'installer.setup_token_path' => $tokenPath,
-            'installer.setup_lock_path' => $tokenPath.'-lock',
-            'installer.in_progress_path' => $tokenPath.'-progress',
-        ]);
-        $installer = app(InstallationManager::class);
-        $installer->ensureSetupToken();
-        $token = explode(':', file_get_contents($tokenPath), 2)[0];
-
-        try {
-            // Neither process may inherit an open PDO connection or a PHPUnit
-            // transaction across the fork.
-            DB::disconnect();
-            $pid = pcntl_fork();
-            $this->assertNotSame(-1, $pid);
-            if ($pid === 0) {
-                try {
-                    DB::purge();
-                    $won = $installer->consumeSetupToken($token);
-                    $replayed = $installer->consumeSetupToken($token);
-                    file_put_contents($resultPath, json_encode(['won' => $won, 'replayed' => $replayed]));
-                    DB::disconnect();
-                    exit(0);
-                } catch (\Throwable) {
-                    DB::disconnect();
-                    exit(2);
-                }
-            }
-            DB::purge();
-            $parentWon = $installer->consumeSetupToken($token);
-            $parentReplayed = $installer->consumeSetupToken($token);
-            DB::disconnect();
-            pcntl_waitpid($pid, $status);
-            $this->assertSame(0, pcntl_wexitstatus($status));
-            $child = json_decode((string) file_get_contents($resultPath), true);
-            $this->assertSame(1, (int) $parentWon + (int) $child['won']);
-            $this->assertFalse($parentReplayed);
-            $this->assertFalse($child['replayed']);
-        } finally {
-            @unlink($tokenPath);
-            @unlink($tokenPath.'-lock');
-            @unlink($tokenPath.'-progress');
-            @unlink($resultPath);
-        }
+        // Invalid remote hosts
+        $this->assertFalse($installer->isLocalDatabaseHost('192.168.1.100'));
+        $this->assertFalse($installer->isLocalDatabaseHost('10.0.0.1'));
+        $this->assertFalse($installer->isLocalDatabaseHost('db.example.com'));
+        $this->assertFalse($installer->isLocalDatabaseHost('198.51.100.2'));
     }
 
     // ── 8. Direct Access After Completion ────────────────────────────────────
@@ -520,7 +420,7 @@ class CpanelInstallerTest extends TestCase
         $response->assertSee('Security session expired');
     }
 
-    public function test_root_install_php_rejects_database_save_without_setup_token(): void
+    public function test_root_install_php_rejects_remote_database_host(): void
     {
         $this->removeInstallationMarker();
         $this->get('/install.php')->assertOk();
@@ -529,11 +429,20 @@ class CpanelInstallerTest extends TestCase
         $originalPost = $_POST;
         $originalGet = $_GET;
         $_SERVER['REQUEST_METHOD'] = 'POST';
-        $_POST = ['_token' => $csrf, 'db_host' => '127.0.0.1'];
+        $_POST = [
+            '_token' => $csrf,
+            'db_host' => 'db.attacker.com',
+            'db_port' => 3306,
+            'db_database' => 'testdb',
+            'db_username' => 'testuser',
+            'db_password' => 'testpass',
+            'app_name' => 'Test',
+            'app_url' => 'https://example.com',
+        ];
         $_GET['step'] = 'database';
         try {
             $this->post('/install.php?step=database', $_POST)
-                ->assertStatus(403)->assertSee('Invalid installer setup token');
+                ->assertOk()->assertSee('Database host must be local');
         } finally {
             $_POST = $originalPost;
             $_GET = $originalGet;
@@ -788,165 +697,62 @@ class CpanelInstallerTest extends TestCase
         }
     }
 
-    public function test_installer_setup_password_creation_and_removal(): void
+    public function test_passwordless_installer_progression_from_requirements_to_database(): void
     {
         $this->removeInstallationMarker();
-        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
-        $pwdPath = storage_path('framework/testing/test-setup-pwd-'.bin2hex(random_bytes(6)));
-        $progressPath = $pwdPath.'-progress';
-        $lockPath = $pwdPath.'-lock';
-        config([
-            'installer.env_path' => $envPath,
-            'installer.setup_password_path' => $pwdPath,
-            'installer.in_progress_path' => $progressPath,
-            'installer.setup_lock_path' => $lockPath,
-        ]);
-        $installer = app(InstallationManager::class);
 
-        try {
-            $installer->ensureSetupPassword();
-            $this->assertFileExists($pwdPath);
-            $this->assertSame(0600, fileperms($pwdPath) & 0777);
-            $pwd = $installer->getSetupPassword();
-            $this->assertNotNull($pwd);
-            $this->assertMatchesRegularExpression('/^[a-f0-9]{16}$/', $pwd);
-            $this->assertTrue($installer->verifySetupPassword($pwd));
-            $this->assertFalse($installer->verifySetupPassword('wrong-password'));
+        // 1. Requirements page renders without setup password prompt
+        $reqPage = $this->get('/install');
+        $reqPage->assertOk();
+        $reqPage->assertSee('Server Requirements');
+        $reqPage->assertSee('Continue to database setup');
+        $reqPage->assertDontSee('Setup Password');
+        $reqPage->assertDontSee('setup_password');
 
-            $installer->markInstalled();
-            $this->assertFileDoesNotExist($pwdPath);
-        } finally {
-            @unlink($envPath);
-            @unlink($pwdPath);
-            @unlink($progressPath);
-            @unlink($lockPath);
-            @unlink(config('installer.installed_path'));
-        }
+        // 2. Database page is accessible directly without HTTP 401 or Basic Auth
+        $dbPage = $this->get('/install/database');
+        $dbPage->assertOk();
+        $dbPage->assertSee('Database Setup');
+        $dbPage->assertDontSee('Setup Authentication');
+        $dbPage->assertDontSee('setup_token');
+        $dbPage->assertDontSee('Setup Password');
     }
 
-    public function test_installer_accepts_http_basic_authentication(): void
+    public function test_database_failure_allows_safe_retry_without_corrupting_state(): void
     {
         $this->removeInstallationMarker();
         $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
-        $pwdPath = storage_path('framework/testing/basic-auth-pwd-'.bin2hex(random_bytes(6)));
-        $progressPath = $pwdPath.'-progress';
-        $lockPath = $pwdPath.'-lock';
+        $progressPath = storage_path('framework/testing/retry-progress-'.bin2hex(random_bytes(6)));
+        $lockPath = storage_path('framework/testing/retry-lock-'.bin2hex(random_bytes(6)));
         config([
             'installer.env_path' => $envPath,
-            'installer.setup_password_path' => $pwdPath,
             'installer.in_progress_path' => $progressPath,
             'installer.setup_lock_path' => $lockPath,
         ]);
-        $installer = app(InstallationManager::class);
-        $installer->ensureSetupPassword();
-        $pwd = $installer->getSetupPassword();
-        $this->assertNotNull($pwd);
 
         try {
-            // Unauthorized access returns 401 with WWW-Authenticate header
-            $unauth = $this->get('/install/database');
-            $unauth->assertStatus(401);
-            $unauth->assertHeader('WWW-Authenticate', 'Basic realm="UPI Gateway Installation"');
-            $unauth->assertSee('Setup Authentication');
-            $unauth->assertDontSee('One-time setup token');
+            // First attempt with non-connecting credentials fails cleanly
+            $fail = $this->from('/install/database')->post('/install/database', [
+                'db_connection' => 'mysql',
+                'db_host' => '127.0.0.1',
+                'db_port' => 65530, // Unused port triggers connection failure
+                'db_database' => 'invalid_db',
+                'db_username' => 'invalid_user',
+                'db_password' => 'invalid_pass',
+                'app_url' => 'https://gateway.example',
+                'app_name' => 'Gateway',
+            ]);
 
-            // Authorized access with HTTP Basic Auth succeeds
-            $auth = $this->withHeaders([
-                'Authorization' => 'Basic '.base64_encode('admin:'.$pwd),
-            ])->get('/install/database');
-            $auth->assertOk();
-            $auth->assertSee('Database Setup');
-            $auth->assertDontSee('One-time setup token');
+            $fail->assertRedirect('/install/database');
+            $fail->assertSessionHasErrors('db_host');
+            $this->assertFalse(session('installer.setup_authorized', false));
+
+            // Database setup page remains accessible for retry
+            $retryPage = $this->get('/install/database');
+            $retryPage->assertOk();
+            $retryPage->assertSee('Database Setup');
         } finally {
             @unlink($envPath);
-            @unlink($pwdPath);
-            @unlink($progressPath);
-            @unlink($lockPath);
-        }
-    }
-
-    public function test_installer_unlock_with_setup_password_allows_token_free_database_configuration(): void
-    {
-        $this->removeInstallationMarker();
-        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
-        $pwdPath = storage_path('framework/testing/unlock-pwd-'.bin2hex(random_bytes(6)));
-        $progressPath = $pwdPath.'-progress';
-        $lockPath = $pwdPath.'-lock';
-        config([
-            'installer.env_path' => $envPath,
-            'installer.setup_password_path' => $pwdPath,
-            'installer.in_progress_path' => $progressPath,
-            'installer.setup_lock_path' => $lockPath,
-        ]);
-        $installer = app(InstallationManager::class);
-        $installer->ensureSetupPassword();
-        $pwd = $installer->getSetupPassword();
-        $this->assertNotNull($pwd);
-
-        try {
-            // Unlocking with wrong password fails
-            $fail = $this->from('/install')->post('/install/unlock', ['setup_password' => 'wrong-password']);
-            $fail->assertSessionHasErrors('setup_password');
-
-            // Unlocking with valid setup password succeeds and authorizes session
-            $success = $this->from('/install')->post('/install/unlock', ['setup_password' => $pwd]);
-            $success->assertRedirect(route('install.database'));
-            $this->assertTrue(session('installer.setup_authorized'));
-
-            // Database setup page is now accessible and has NO token field
-            $dbPage = $this->get('/install/database');
-            $dbPage->assertOk();
-            $dbPage->assertSee('Database Setup');
-            $dbPage->assertDontSee('setup_token');
-            $dbPage->assertDontSee('One-time setup token');
-        } finally {
-            @unlink($envPath);
-            @unlink($pwdPath);
-            @unlink($progressPath);
-            @unlink($lockPath);
-        }
-    }
-
-    public function test_database_failure_does_not_rotate_setup_password(): void
-    {
-        $this->removeInstallationMarker();
-        $envPath = sys_get_temp_dir().'/gateway-fresh-env-'.bin2hex(random_bytes(6));
-        $pwdPath = storage_path('framework/testing/no-rotate-pwd-'.bin2hex(random_bytes(6)));
-        $progressPath = $pwdPath.'-progress';
-        $lockPath = $pwdPath.'-lock';
-        config([
-            'installer.env_path' => $envPath,
-            'installer.setup_password_path' => $pwdPath,
-            'installer.in_progress_path' => $progressPath,
-            'installer.setup_lock_path' => $lockPath,
-        ]);
-        $installer = app(InstallationManager::class);
-        $installer->ensureSetupPassword();
-        $originalPwd = $installer->getSetupPassword();
-        $this->assertNotNull($originalPwd);
-
-        try {
-            $this->withSession(['installer.setup_authorized' => true])
-                ->from('/install/database')
-                ->post('/install/database', [
-                    'db_connection' => 'mysql',
-                    'db_host' => '127.0.0.1',
-                    'db_port' => 65530, // Unused port triggers connection failure
-                    'db_database' => 'invalid_db',
-                    'db_username' => 'invalid_user',
-                    'db_password' => 'invalid_pass',
-                    'app_url' => 'https://gateway.example',
-                    'app_name' => 'Gateway',
-                ])
-                ->assertRedirect('/install/database')
-                ->assertSessionHasErrors('db_host');
-
-            // Password remains identical (did not rotate)
-            $this->assertSame($originalPwd, $installer->getSetupPassword());
-            $this->assertTrue($installer->verifySetupPassword($originalPwd));
-        } finally {
-            @unlink($envPath);
-            @unlink($pwdPath);
             @unlink($progressPath);
             @unlink($lockPath);
         }
