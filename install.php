@@ -1,0 +1,429 @@
+<?php
+
+use App\Support\InstallationManager;
+use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Support\Facades\Artisan;
+
+/**
+ * Root-level Browser Installation Wizard for cPanel and Shared Hosting.
+ *
+ * Allows full browser-based deployment without SSH, Composer, Node.js, or npm.
+ */
+
+// ── 1. Early Safety & PHP Version Checks ─────────────────────────────────────
+if (version_compare(PHP_VERSION, '8.2.0', '<')) {
+    http_response_code(500);
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html><html><head><title>PHP Version Error</title></head><body style="font-family:sans-serif;padding:2rem;background:#f8fafc;color:#1e293b;">';
+    echo '<h1 style="color:#e11d48;">PHP 8.2 or Higher Required</h1>';
+    echo '<p>Your server is currently running PHP <strong>'.htmlspecialchars(PHP_VERSION, ENT_QUOTES, 'UTF-8').'</strong>. Please switch to PHP 8.2 or higher in your cPanel MultiPHP Manager or Select PHP Version.</p>';
+    echo '</body></html>';
+
+    return;
+}
+
+$baseDir = __DIR__;
+$installedFile = $baseDir.'/storage/installed';
+
+// ── 2. Session & Security Configuration ──────────────────────────────────────
+if (session_status() === PHP_SESSION_NONE) {
+    $isHttps = (! empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443)
+        || (! empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+
+    ini_set('session.cookie_httponly', '1');
+    ini_set('session.use_only_cookies', '1');
+    if ($isHttps) {
+        ini_set('session.cookie_secure', '1');
+    }
+    session_start();
+}
+
+if (empty($_SESSION['_installer_csrf'])) {
+    $_SESSION['_installer_csrf'] = bin2hex(random_bytes(32));
+}
+$csrfToken = $_SESSION['_installer_csrf'];
+
+// ── 3. Installation Marker & Re-entry Protection ─────────────────────────────
+// If the marker file exists, or if Laravel is already installed with an admin user,
+// immediately lock the installer to prevent re-installation or credential overwrites.
+$alreadyInstalled = file_exists($installedFile);
+
+if (! $alreadyInstalled && file_exists($baseDir.'/vendor/autoload.php')) {
+    try {
+        require_once $baseDir.'/vendor/autoload.php';
+        $app = function_exists('app') && app()->bound(Kernel::class)
+            ? app()
+            : (require $baseDir.'/bootstrap/app.php');
+        $kernel = $app->make(Kernel::class);
+        $kernel->bootstrap();
+        $installer = app(InstallationManager::class);
+        if ($installer->isInstalled()) {
+            $alreadyInstalled = true;
+            $installer->markInstalled();
+        }
+    } catch (Throwable) {
+        // If database is offline or unconfigured, we do not treat as installed unless marker exists
+    }
+}
+
+$showCompletion = $alreadyInstalled
+    && ($_GET['step'] ?? '') === 'done'
+    && ! empty($_SESSION['_installer_completed']);
+
+if ($alreadyInstalled && ! $showCompletion) {
+    http_response_code(403);
+    header('Content-Type: text/html; charset=utf-8');
+    ?>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Installer Locked · UPI Gateway</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; padding: 2rem; display: flex; align-items: center; justify-content: center; min-height: 80vh; }
+            .card { background: #ffffff; max-width: 480px; width: 100%; padding: 2rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); border: 1px solid #e2e8f0; text-align: center; }
+            .badge { display: inline-block; padding: 0.35rem 0.85rem; border-radius: 9999px; background: #fee2e2; color: #991b1b; font-size: 0.8rem; font-weight: 700; margin-bottom: 1rem; }
+            h1 { font-size: 1.35rem; margin-bottom: 0.75rem; color: #0f172a; }
+            p { color: #64748b; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.5rem; }
+            .btn { display: inline-block; padding: 0.65rem 1.5rem; background: #4f46e5; color: white; text-decoration: none; border-radius: 0.5rem; font-weight: 600; font-size: 0.95rem; }
+            .btn:hover { background: #4338ca; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <span class="badge">INSTALLATION LOCKED</span>
+            <h1>Application Already Installed</h1>
+            <p>The installation wizard has been permanently locked for security to protect existing accounts and transaction data.</p>
+            <a href="login" class="btn">Go to Merchant Dashboard</a>
+        </div>
+    </body>
+    </html>
+    <?php
+    return;
+}
+
+// ── 4. Wizard Helpers ────────────────────────────────────────────────────────
+if (! file_exists($baseDir.'/vendor/autoload.php')) {
+    http_response_code(500);
+    echo '<p style="color:red;padding:2rem;">Missing vendor/ dependencies. Please ensure the full distribution package is uploaded.</p>';
+
+    return;
+}
+
+require_once $baseDir.'/vendor/autoload.php';
+$app = function_exists('app') && app()->bound(Kernel::class)
+    ? app()
+    : (require $baseDir.'/bootstrap/app.php');
+$kernel = $app->make(Kernel::class);
+$kernel->bootstrap();
+$installer = app(InstallationManager::class);
+
+$step = $_GET['step'] ?? 'requirements';
+$error = null;
+$success = null;
+
+$method = $_SERVER['REQUEST_METHOD'] ?? (function_exists('request') ? request()->method() : 'GET');
+
+// Validate CSRF token on POST
+if ($method === 'POST') {
+    $submittedToken = $_POST['_token'] ?? (function_exists('request') ? request()->input('_token', '') : '');
+    if (! hash_equals($csrfToken, (string) $submittedToken)) {
+        http_response_code(403);
+        $error = 'Security session expired. Please refresh the page and try again.';
+        $step = $_GET['step'] ?? (function_exists('request') ? request()->query('step', 'requirements') : 'requirements');
+    }
+}
+
+// ── 5. Action Handlers ───────────────────────────────────────────────────────
+if ($method === 'POST' && ! $error) {
+    if ($step === 'database') {
+        $dbHost = trim($_POST['db_host'] ?? '');
+        $dbPort = (int) ($_POST['db_port'] ?? 3306);
+        $dbDatabase = trim($_POST['db_database'] ?? '');
+        $dbUsername = trim($_POST['db_username'] ?? '');
+        $dbPassword = (string) ($_POST['db_password'] ?? '');
+        $appName = trim($_POST['app_name'] ?? 'UPI Gateway');
+        $appUrl = trim($_POST['app_url'] ?? '');
+
+        // Validation
+        if ($dbHost === '' || preg_match('/[\r\n]/', $dbHost)) {
+            $error = 'Invalid database host.';
+        } elseif ($dbPort < 1 || $dbPort > 65535) {
+            $error = 'Database port must be between 1 and 65535.';
+        } elseif ($dbDatabase === '' || ! preg_match('/^[A-Za-z0-9_$-]+$/', $dbDatabase)) {
+            $error = 'Database name contains invalid characters.';
+        } elseif ($dbUsername === '' || preg_match('/[\r\n]/', $dbUsername)) {
+            $error = 'Invalid database username.';
+        } elseif (preg_match('/[\r\n]/', $dbPassword)) {
+            $error = 'Database password cannot contain newlines.';
+        } elseif ($appName === '' || preg_match('/[\r\n]/', $appName)) {
+            $error = 'Invalid application name.';
+        } elseif ($appUrl === '' || ! filter_var($appUrl, FILTER_VALIDATE_URL)) {
+            $error = 'Please enter a valid application URL (e.g. https://yourdomain.com).';
+        }
+
+        if (! $error) {
+            // Test connection with PDO directly
+            try {
+                $installer->testDatabaseConnection([
+                    'db_connection' => 'mysql',
+                    'db_host' => $dbHost,
+                    'db_port' => $dbPort,
+                    'db_database' => $dbDatabase,
+                    'db_username' => $dbUsername,
+                    'db_password' => $dbPassword,
+                ]);
+
+                // Write environment atomically
+                $installer->writeEnvironment([
+                    'db_connection' => 'mysql',
+                    'db_host' => $dbHost,
+                    'db_port' => $dbPort,
+                    'db_database' => $dbDatabase,
+                    'db_username' => $dbUsername,
+                    'db_password' => $dbPassword,
+                    'app_name' => $appName,
+                    'app_url' => $appUrl,
+                ]);
+
+                Artisan::call('config:clear');
+                $_SESSION['_installer_db_configured'] = true;
+                header('Location: install.php?step=migrate');
+
+                return;
+            } catch (Throwable) {
+                $error = 'Could not connect to the database with the provided credentials. Check database name, username, password and host in cPanel.';
+            }
+        }
+    } elseif ($step === 'migrate') {
+        try {
+            $exitCode = Artisan::call('migrate', ['--force' => true]);
+            if ($exitCode === 0 && $installer->databaseIsMigrated()) {
+                $_SESSION['_installer_migrated'] = true;
+                header('Location: install.php?step=admin');
+
+                return;
+            } else {
+                $error = 'Database migration did not complete successfully. Check server logs.';
+            }
+        } catch (Throwable) {
+            $error = 'Migration error occurred. Ensure your database user has ALL PRIVILEGES in cPanel.';
+        }
+    } elseif ($step === 'admin') {
+        $adminName = trim($_POST['name'] ?? '');
+        $adminEmail = trim($_POST['email'] ?? '');
+        $adminPassword = (string) ($_POST['password'] ?? '');
+        $adminPasswordConfirm = (string) ($_POST['password_confirmation'] ?? '');
+
+        if ($adminName === '') {
+            $error = 'Please enter administrator name.';
+        } elseif (! filter_var($adminEmail, FILTER_VALIDATE_EMAIL)) {
+            $error = 'Please provide a valid administrator email address.';
+        } elseif (strlen($adminPassword) < 10) {
+            $error = 'Password must be at least 10 characters long.';
+        } elseif ($adminPassword !== $adminPasswordConfirm) {
+            $error = 'Password confirmation does not match.';
+        }
+
+        if (! $error) {
+            try {
+                $installer->createAdminUser($adminName, $adminEmail, $adminPassword);
+                $installer->markInstalled();
+                $_SESSION['_installer_completed'] = true;
+                header('Location: install.php?step=done');
+
+                return;
+            } catch (Throwable $e) {
+                if (str_contains($e->getMessage(), 'already exists')) {
+                    $error = 'An administrator account already exists.';
+                } else {
+                    $error = 'Could not create administrator account. Please try again.';
+                }
+            }
+        }
+    }
+}
+
+// ── 6. Step Views ────────────────────────────────────────────────────────────
+$requirements = $installer->checkRequirements();
+$allPassed = $installer->allRequirementsPassed();
+$currentUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http').'://'.($_SERVER['HTTP_HOST'] ?? 'localhost').preg_replace('/\/install(\.php)?.*$/i', '', $_SERVER['REQUEST_URI'] ?? '');
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Install · UPI Gateway</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; padding: 2rem 1rem; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .wrapper { width: 100%; max-width: 580px; }
+        .logo { display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-bottom: 2rem; }
+        .logo-icon { width: 40px; height: 40px; background: #4f46e5; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; }
+        .logo-title { font-size: 1.35rem; font-weight: 800; color: #0f172a; }
+        .steps { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.75rem; position: relative; }
+        .step-item { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; z-index: 1; }
+        .step-bubble { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: bold; background: #e2e8f0; color: #64748b; }
+        .step-bubble.active { background: #4f46e5; color: white; }
+        .step-bubble.passed { background: #10b981; color: white; }
+        .step-label { font-size: 0.75rem; font-weight: 600; color: #64748b; }
+        .card { background: white; border-radius: 1rem; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05); padding: 2rem; margin-bottom: 1.5rem; }
+        h2 { font-size: 1.25rem; font-weight: 700; margin-top: 0; margin-bottom: 0.5rem; color: #0f172a; }
+        p.subtitle { color: #64748b; font-size: 0.9rem; margin-top: 0; margin-bottom: 1.5rem; line-height: 1.4; }
+        .req-list { list-style: none; padding: 0; margin: 0 0 1.5rem 0; border: 1px solid #e2e8f0; border-radius: 0.5rem; overflow: hidden; }
+        .req-item { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
+        .req-item:last-child { border-bottom: none; }
+        .tag-pass { background: #dcfce7; color: #166534; font-size: 0.75rem; font-weight: 700; padding: 0.2rem 0.5rem; border-radius: 4px; }
+        .tag-fail { background: #fee2e2; color: #991b1b; font-size: 0.75rem; font-weight: 700; padding: 0.2rem 0.5rem; border-radius: 4px; }
+        .form-group { margin-bottom: 1.2rem; }
+        label { display: block; font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 0.4rem; }
+        input[type="text"], input[type="email"], input[type="password"], input[type="url"], input[type="number"] { width: 100%; padding: 0.65rem 0.85rem; border: 1px solid #cbd5e1; border-radius: 0.5rem; font-size: 0.95rem; font-family: inherit; }
+        input:focus { outline: none; border-color: #4f46e5; ring: 2px solid #c7d2fe; }
+        .help-text { font-size: 0.75rem; color: #64748b; margin-top: 0.3rem; }
+        .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.85rem; margin-bottom: 1.25rem; }
+        .btn { display: block; width: 100%; text-align: center; padding: 0.75rem 1.25rem; background: #4f46e5; color: white; border: none; border-radius: 0.5rem; font-size: 0.95rem; font-weight: 600; cursor: pointer; text-decoration: none; }
+        .btn:hover { background: #4338ca; }
+        .btn:disabled { background: #94a3b8; cursor: not-allowed; }
+        .cron-box { background: #0f172a; color: #f8fafc; font-family: monospace; font-size: 0.8rem; padding: 0.75rem 1rem; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 1rem; }
+    </style>
+</head>
+<body>
+<div class="wrapper">
+    <div class="logo">
+        <div class="logo-icon">&#x26A1;</div>
+        <div class="logo-title">UPI Gateway Installation</div>
+    </div>
+
+    <div class="steps">
+        <div class="step-item">
+            <div class="step-bubble <?= $step === 'requirements' ? 'active' : 'passed' ?>">1</div>
+            <span class="step-label">Checks</span>
+        </div>
+        <div class="step-item">
+            <div class="step-bubble <?= $step === 'database' ? 'active' : ($step === 'requirements' ? '' : 'passed') ?>">2</div>
+            <span class="step-label">Database</span>
+        </div>
+        <div class="step-item">
+            <div class="step-bubble <?= $step === 'migrate' ? 'active' : (in_array($step, ['admin', 'done']) ? 'passed' : '') ?>">3</div>
+            <span class="step-label">Migrate</span>
+        </div>
+        <div class="step-item">
+            <div class="step-bubble <?= $step === 'admin' ? 'active' : ($step === 'done' ? 'passed' : '') ?>">4</div>
+            <span class="step-label">Admin</span>
+        </div>
+        <div class="step-item">
+            <div class="step-bubble <?= $step === 'done' ? 'passed' : '' ?>">5</div>
+            <span class="step-label">Complete</span>
+        </div>
+    </div>
+
+    <?php if ($error) { ?>
+        <div class="alert-error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
+    <?php } ?>
+
+    <div class="card">
+        <?php if ($step === 'requirements') { ?>
+            <h2>Server &amp; Extension Checks</h2>
+            <p class="subtitle">Checking your cPanel environment for required PHP modules and writable paths.</p>
+            <ul class="req-list">
+                <?php foreach ($requirements as $r) { ?>
+                    <li class="req-item">
+                        <span><?= htmlspecialchars($r['name'], ENT_QUOTES, 'UTF-8') ?></span>
+                        <span class="<?= $r['pass'] ? 'tag-pass' : 'tag-fail' ?>"><?= $r['pass'] ? 'Pass' : 'Missing' ?></span>
+                    </li>
+                <?php } ?>
+            </ul>
+            <?php if ($allPassed) { ?>
+                <a href="install.php?step=database" class="btn">Continue to Database Setup &rarr;</a>
+            <?php } else { ?>
+                <button disabled class="btn">Requirements Unmet &mdash; Please enable modules in cPanel</button>
+            <?php } ?>
+
+        <?php } elseif ($step === 'database') { ?>
+            <h2>Database Configuration</h2>
+            <p class="subtitle">Enter your MySQL database credentials created in cPanel MySQL Databases.</p>
+            <form method="POST" action="install.php?step=database">
+                <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <div class="form-group">
+                    <label>Application Name</label>
+                    <input type="text" name="app_name" value="<?= htmlspecialchars($_POST['app_name'] ?? 'UPI Gateway', ENT_QUOTES, 'UTF-8') ?>" required>
+                </div>
+                <div class="form-group">
+                    <label>Application URL</label>
+                    <input type="url" name="app_url" value="<?= htmlspecialchars($_POST['app_url'] ?? $currentUrl, ENT_QUOTES, 'UTF-8') ?>" required>
+                    <div class="help-text">Your domain root with HTTPS (e.g. https://payments.yourbusiness.com).</div>
+                </div>
+                <div class="form-group">
+                    <label>MySQL Host</label>
+                    <input type="text" name="db_host" value="<?= htmlspecialchars($_POST['db_host'] ?? '127.0.0.1', ENT_QUOTES, 'UTF-8') ?>" required>
+                    <div class="help-text">Usually 127.0.0.1 or localhost on cPanel.</div>
+                </div>
+                <div class="form-group">
+                    <label>MySQL Port</label>
+                    <input type="number" name="db_port" value="<?= htmlspecialchars($_POST['db_port'] ?? '3306', ENT_QUOTES, 'UTF-8') ?>" required>
+                </div>
+                <div class="form-group">
+                    <label>Database Name</label>
+                    <input type="text" name="db_database" value="<?= htmlspecialchars($_POST['db_database'] ?? '', ENT_QUOTES, 'UTF-8') ?>" placeholder="cpaneluser_gateway" required>
+                    <div class="help-text">Include cPanel prefix if applicable.</div>
+                </div>
+                <div class="form-group">
+                    <label>Database Username</label>
+                    <input type="text" name="db_username" value="<?= htmlspecialchars($_POST['db_username'] ?? '', ENT_QUOTES, 'UTF-8') ?>" placeholder="cpaneluser_dbuser" required>
+                </div>
+                <div class="form-group">
+                    <label>Database Password</label>
+                    <input type="password" name="db_password" value="" autocomplete="new-password">
+                </div>
+                <button type="submit" class="btn">Test Connection &amp; Save Configuration</button>
+            </form>
+
+        <?php } elseif ($step === 'migrate') { ?>
+            <h2>Database Migrations</h2>
+            <p class="subtitle">The database configuration was saved. Click below to create all required database tables safely in-process.</p>
+            <form method="POST" action="install.php?step=migrate">
+                <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <button type="submit" class="btn">Run Database Migrations Now</button>
+            </form>
+
+        <?php } elseif ($step === 'admin') { ?>
+            <h2>Create Primary Administrator</h2>
+            <p class="subtitle">Set up the master administrator account for dashboard access and API configuration.</p>
+            <form method="POST" action="install.php?step=admin">
+                <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <div class="form-group">
+                    <label>Administrator Name</label>
+                    <input type="text" name="name" value="<?= htmlspecialchars($_POST['name'] ?? '', ENT_QUOTES, 'UTF-8') ?>" placeholder="Owner / Manager" required>
+                </div>
+                <div class="form-group">
+                    <label>Administrator Email</label>
+                    <input type="email" name="email" value="<?= htmlspecialchars($_POST['email'] ?? '', ENT_QUOTES, 'UTF-8') ?>" placeholder="admin@yourbusiness.com" required>
+                </div>
+                <div class="form-group">
+                    <label>Password (min 10 characters)</label>
+                    <input type="password" name="password" minlength="10" required>
+                </div>
+                <div class="form-group">
+                    <label>Confirm Password</label>
+                    <input type="password" name="password_confirmation" minlength="10" required>
+                </div>
+                <button type="submit" class="btn">Finalize Installation</button>
+            </form>
+
+        <?php } elseif ($step === 'done') { ?>
+            <h2>Installation Complete!</h2>
+            <p class="subtitle">The application is fully installed and secured. The installer has been permanently locked.</p>
+            <p style="font-size: 0.9rem; color: #475569; margin-bottom: 0.75rem;"><strong>Required Next Step: Configure cPanel Cron Jobs</strong></p>
+            <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 0.5rem;">Add these two jobs in cPanel &rarr; Cron Jobs (running every minute):</p>
+            <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan schedule:run &gt;&gt; storage/logs/scheduler.log 2&gt;&amp;1</div>
+            <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan queue:work database --queue=default --stop-when-empty --max-time=50 --tries=6 --timeout=60 --memory=128 --sleep=3 &gt;&gt; storage/logs/queue.log 2&gt;&amp;1</div>
+            <a href="login" class="btn" style="margin-top: 1.5rem;">Proceed to Merchant Login &rarr;</a>
+        <?php } ?>
+    </div>
+</div>
+</body>
+</html>

@@ -7,6 +7,7 @@ use App\Models\Order;
 use App\Models\User;
 use App\Services\OrderService;
 use App\Support\SafeUrl;
+use App\Support\WebhookSignature;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Facades\Http;
@@ -275,7 +276,7 @@ class WebhookSsrfTest extends TestCase
 
         // Webhook request must be signed correctly.
         Http::assertSent(fn (HttpRequest $r) => $r->url() === 'https://merchant.test/hook'
-            && $r->header('X-Signature')[0] === hash_hmac('sha256', $r->body(), $user->api_secret)
+            && WebhookSignature::verify($r->body(), $r->header('X-Signature')[0], $user->api_secret)
             && $r['event'] === 'order.paid'
         );
 

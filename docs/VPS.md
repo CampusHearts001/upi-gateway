@@ -2,6 +2,8 @@
 
 Ubuntu VPS deployment uses Nginx, PHP-FPM, and MySQL. These commands prepare the server; the final application setup is completed through the same browser wizard described in [INSTALLATION.md](INSTALLATION.md).
 
+The installer disables public registration by default. To intentionally open merchant signup, set `ALLOW_REGISTRATION=true` in the private `.env` file and run `php artisan config:cache` if configuration is cached. Set it back to `false` to close signup; existing merchant login and administrator merchant controls remain available.
+
 ## 1. Install server packages
 
 ```bash

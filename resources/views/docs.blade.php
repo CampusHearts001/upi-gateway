@@ -350,11 +350,14 @@ Content-Type: application/json"])
 
                 <div class="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex gap-3">
                     <x-icon name="alert" class="mt-0.5 w-5 h-5 shrink-0 text-blue-600" />
-                    <p class="text-sm text-blue-800">The same event may be delivered more than once. Process it idempotently using <code class="font-mono text-xs bg-blue-100 px-1 rounded">order_id</code> plus the event name, then confirm <code class="kbd">status</code>, <code class="kbd">environment</code>, amount, and your <code class="kbd">client_order_id</code>.</p>
+                    <p class="text-sm text-blue-800">Delivery is at least once and may be out of order. After signature verification, deduplicate the signed <code class="kbd">event_id</code> (also sent as <code class="kbd">X-Event-Id</code>) transactionally. Use <code class="kbd">event_sequence</code> per order to prevent older events from reverting newer state, fulfill once, and confirm status, environment, amount and client_order_id. Queue insertion is not merchant receipt.</p>
                 </div>
 
                 @include('docs._code', ['title' => 'Payload · order.paid', 'lang' => 'json', 'code' => '{
   "event": "order.paid",
+  "event_id": "00000000-0000-4000-8000-000000000001",
+  "event_sequence": 2,
+  "occurred_at": "2026-11-07T12:10:00+05:30",
   "data": {
     "order_id": "ORDAB12CD34EF56GH78",
     "client_order_id": "INV1001",
@@ -379,25 +382,49 @@ Content-Type: application/json"])
 
             {{-- Verify Signature --}}
             <section id="verify" class="section-anchor">
-                <h2 class="text-2xl font-bold tracking-tight text-slate-900">Verify signature</h2>
-                <p class="mt-3 text-slate-600">Compute the lowercase hexadecimal HMAC-SHA256 of the exact raw request body. Use the Live API secret for the Live endpoint and the Sandbox API secret for the Sandbox endpoint. Compare in constant time before parsing or processing the payload; never trust frontend success or an unsigned body.</p>
+                <h2 class="text-2xl font-bold tracking-tight text-slate-900">Verify signature &amp; replay protection</h2>
+                <p class="mt-3 text-slate-600">Every webhook request includes an <code class="kbd">X-Signature</code> header in the format <code class="kbd">t={timestamp},v1={hmac}</code>, signed with your dedicated Webhook Signing Secret (available in <span class="font-semibold text-slate-800">Dashboard → API &amp; Webhooks</span>). The signature is computed as <code class="kbd">HMAC-SHA256(timestamp + "." + raw_body, secret)</code>.</p>
+                <div class="mt-3 text-sm text-slate-600 space-y-1">
+                    <p><strong>1. Five-minute timestamp tolerance:</strong> Reject any webhook where <code class="kbd">|current_time - timestamp| &gt; 300</code> to prevent replay attacks.</p>
+                    <p><strong>2. Transactional event deduplication:</strong> Check that the signed <code class="kbd">event_id</code> (also passed in <code class="kbd">X-Event-Id</code>) has not been processed previously before fulfilling orders.</p>
+                    <p><strong>3. Backward compatibility:</strong> If you have not yet generated a dedicated webhook secret, your API secret is used as a fallback. A legacy body-only signature is also sent in <code class="kbd">X-Signature-Legacy</code>.</p>
+                </div>
 
                 @php
                 $phpVerifyCode = implode("\n", [
                     '<?php',
-                    '$body     = file_get_contents("php://input");',
-                    '$secret   = getenv("PAYMENT_WEBHOOK_SECRET");',
-                    '$expected = hash_hmac("sha256", $body, $secret);',
-                    '$given    = $_SERVER["HTTP_X_SIGNATURE"] ?? "";',
+                    '$body      = file_get_contents("php://input");',
+                    '$secret    = getenv("PAYMENT_WEBHOOK_SECRET");',
+                    '$header    = $_SERVER["HTTP_X_SIGNATURE"] ?? "";',
                     '',
-                    'if (!hash_equals($expected, $given)) {',
-                    '    http_response_code(401);',
-                    '    exit;',
+                    '// Parse t=timestamp,v1=signature',
+                    '$params = [];',
+                    'foreach (explode(",", $header) as $pair) {',
+                    '    $p = explode("=", trim($pair), 2);',
+                    '    if (count($p) === 2) { $params[trim($p[0])] = trim($p[1]); }',
                     '}',
                     '',
+                    '$timestamp = isset($params["t"]) ? (int) $params["t"] : 0;',
+                    '$signature = $params["v1"] ?? "";',
+                    '',
+                    '// 1. Replay defense: 5-minute tolerance (300 seconds)',
+                    'if (abs(time() - $timestamp) > 300) {',
+                    '    http_response_code(401);',
+                    '    exit("Webhook timestamp expired or invalid");',
+                    '}',
+                    '',
+                    '// 2. Verify signature: HMAC-SHA256 of timestamp + "." + body',
+                    '$expected = hash_hmac("sha256", "{$timestamp}.{$body}", $secret);',
+                    'if (!hash_equals($expected, $signature)) {',
+                    '    http_response_code(401);',
+                    '    exit("Invalid signature");',
+                    '}',
+                    '',
+                    '// 3. Deduplicate event transactionally and process',
                     '$event = json_decode($body, true);',
+                    '// Check your database: if event_id already processed, return 200 OK without double-fulfilling.',
                     'if ($event["event"] === "order.paid") {',
-                    '    // Fulfil $event["data"]["client_order_id"] (idempotently)',
+                    '    // Fulfil $event["data"]["client_order_id"] idempotently',
                     '}',
                     'http_response_code(200);',
                 ]);
@@ -409,16 +436,31 @@ Content-Type: application/json"])
                     'const crypto = require("crypto");',
                     '',
                     'app.post("/webhook", express.raw({ type: "application/json" }), (req, res) => {',
-                    '  const expected = crypto',
-                    '    .createHmac("sha256", process.env.PAYMENT_WEBHOOK_SECRET)',
-                    '    .update(req.body)',
-                    '    .digest("hex");',
+                    '  const header = req.get("X-Signature") || "";',
+                    '  const secret = process.env.PAYMENT_WEBHOOK_SECRET;',
                     '',
-                    '  const given = req.get("X-Signature") || "";',
-                    '  if (given.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(given))) {',
-                    '    return res.sendStatus(401);',
+                    '  // Parse t=timestamp,v1=signature',
+                    '  const params = Object.fromEntries(header.split(",").map(p => p.split("=")));',
+                    '  const timestamp = parseInt(params.t, 10);',
+                    '  const signature = params.v1 || "";',
+                    '',
+                    '  // 1. Replay defense: 5-minute tolerance (300 seconds)',
+                    '  const now = Math.floor(Date.now() / 1000);',
+                    '  if (isNaN(timestamp) || Math.abs(now - timestamp) > 300) {',
+                    '    return res.status(401).send("Webhook timestamp expired or invalid");',
                     '  }',
                     '',
+                    '  // 2. Verify signature',
+                    '  const expected = crypto',
+                    '    .createHmac("sha256", secret)',
+                    '    .update(`${timestamp}.${req.body}`)',
+                    '    .digest("hex");',
+                    '',
+                    '  if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature))) {',
+                    '    return res.status(401).send("Invalid signature");',
+                    '  }',
+                    '',
+                    '  // 3. Deduplicate event_id and process',
                     '  const event = JSON.parse(req.body);',
                     '  if (event.event === "order.paid") {',
                     '    // Fulfil event.data.client_order_id (idempotently)',

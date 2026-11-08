@@ -2,14 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\User;
 use App\Support\InstallationManager;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rules\Password;
 use Throwable;
@@ -20,7 +18,7 @@ class InstallController extends Controller
 
     public function index()
     {
-        return view('install.index', ['requirements' => $this->checkRequirements()]);
+        return view('install.index', ['requirements' => $this->installer->checkRequirements()]);
     }
 
     public function database()
@@ -146,36 +144,16 @@ class InstallController extends Controller
         ]);
 
         try {
-            DB::transaction(function () use ($request) {
-                if ($this->installer->hasAdminUser()) {
-                    abort(409, 'An administrator already exists.');
-                }
-
-                DB::table('installation_guards')->insert([
-                    'name' => 'primary_admin',
-                    'created_at' => now(),
-                ]);
-
-                if (User::where('role', 'admin')->exists()) {
-                    abort(409, 'An administrator already exists.');
-                }
-
-                $admin = User::create([
-                    'name' => $request->name,
-                    'email' => $request->email,
-                    'password' => Hash::make($request->password),
-                    'role' => 'admin',
-                    'is_active' => true,
-                ]);
-
-                DB::table('installation_guards')
-                    ->where('name', 'primary_admin')
-                    ->update(['user_id' => $admin->id]);
-            });
+            $this->installer->createAdminUser($request->name, $request->email, $request->password);
         } catch (UniqueConstraintViolationException) {
             abort(409, 'An administrator already exists.');
         } catch (QueryException $e) {
             if (str_contains($e->getMessage(), 'UNIQUE') || str_contains($e->getMessage(), 'Duplicate') || $e->getCode() == 23000) {
+                abort(409, 'An administrator already exists.');
+            }
+            throw $e;
+        } catch (RuntimeException $e) {
+            if (str_contains($e->getMessage(), 'already exists')) {
                 abort(409, 'An administrator already exists.');
             }
             throw $e;
@@ -196,21 +174,5 @@ class InstallController extends Controller
         }
 
         return view('install.done');
-    }
-
-    private function checkRequirements(): array
-    {
-        return [
-            ['name' => 'PHP >= 8.2',         'pass' => version_compare(PHP_VERSION, '8.2.0', '>=')],
-            ['name' => 'PDO Extension',       'pass' => extension_loaded('pdo')],
-            ['name' => 'PDO MySQL (required)', 'pass' => extension_loaded('pdo_mysql')],
-            ['name' => 'OpenSSL Extension',   'pass' => extension_loaded('openssl')],
-            ['name' => 'Mbstring Extension',  'pass' => extension_loaded('mbstring')],
-            ['name' => 'Tokenizer Extension', 'pass' => extension_loaded('tokenizer')],
-            ['name' => 'JSON Extension',      'pass' => extension_loaded('json')],
-            ['name' => 'cURL Extension',      'pass' => extension_loaded('curl')],
-            ['name' => 'storage/ writable',   'pass' => is_writable(storage_path())],
-            ['name' => '.env writable',       'pass' => is_writable(base_path('.env')) || ! file_exists(base_path('.env'))],
-        ];
     }
 }

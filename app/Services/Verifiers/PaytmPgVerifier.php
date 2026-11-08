@@ -18,6 +18,10 @@ class PaytmPgVerifier implements HostedCheckout, Verifier
 {
     public function startCheckout(Order $order, string $returnUrl): array
     {
+        $order->load('paymentAccount');
+        $order->paymentAccount?->assertLiveProviderOrder($order, 'paytm_pg');
+        abort_unless($order->paymentAccount, 422, 'A matching payment account is required.');
+
         $account = $order->paymentAccount;
         $mid = $account->credential('mid');
         $base = $this->baseUrl($account);
@@ -66,6 +70,10 @@ class PaytmPgVerifier implements HostedCheckout, Verifier
 
     public function check(Order $order): VerificationResult
     {
+        $order->load('paymentAccount');
+        $order->paymentAccount?->assertLiveProviderOrder($order, 'paytm_pg');
+        abort_unless($order->paymentAccount, 422, 'A matching payment account is required.');
+
         $account = $order->paymentAccount;
 
         try {
@@ -93,21 +101,43 @@ class PaytmPgVerifier implements HostedCheckout, Verifier
             return VerificationResult::pending(['error' => 'Order ID mismatch']);
         }
 
-        if ($this->toPaise($body['txnAmount'] ?? 0) !== $this->toPaise($order->amount)) {
+        if (! is_numeric($body['txnAmount'] ?? null)
+            || ! preg_match('/^\d+(?:\.\d{1,2})?$/', (string) $body['txnAmount'])
+            || $this->toPaise($body['txnAmount']) !== $this->toPaise($order->amount)) {
             Log::warning('Paytm PG amount mismatch', [
                 'order_id' => $order->order_no,
                 'expected_paise' => $this->toPaise($order->amount),
-                'got_paise' => $this->toPaise($body['txnAmount'] ?? 0),
+                'got_paise' => is_numeric($body['txnAmount'] ?? null) ? $this->toPaise($body['txnAmount']) : null,
                 // Do NOT log $body — may contain customer PII or payment details.
             ]);
 
             return VerificationResult::pending(['error' => 'Amount mismatch']);
         }
 
-        return VerificationResult::paid(
+        if (($body['currency'] ?? 'INR') !== 'INR') {
+            return VerificationResult::pending(['error' => 'Currency mismatch']);
+        }
+        if (trim((string) ($body['bankTxnId'] ?? '')) === '' && trim((string) ($body['txnId'] ?? '')) === '') {
+            return VerificationResult::pending(['error' => 'Missing transaction reference']);
+        }
+
+        $occurredAt = VerificationResult::extractRawTimestamp('paytm_pg', $body);
+        if ($occurredAt === null && (bool) config('gateway.evidence_require_timestamp', true)) {
+            Log::warning('Paytm PG transaction missing or invalid timestamp', [
+                'order_id' => $order->order_no,
+            ]);
+
+            return VerificationResult::pending(['error' => 'Missing or invalid provider transaction timestamp']);
+        }
+
+        return VerificationResult::fromPaytmPg(
+            order: $order,
+            amount: $body['txnAmount'],
             utr: $body['bankTxnId'] ?? null,
             txnId: $body['txnId'] ?? null,
             raw: $body,
+            currency: $body['currency'] ?? 'INR',
+            occurredAt: $occurredAt,
         );
     }
 

@@ -136,6 +136,8 @@ class SecurityHardeningTest extends TestCase
 
     public function test_registration_rejects_short_passwords(): void
     {
+        config(['auth.allow_registration' => true]);
+
         $this->post('/register', [
             'name' => 'Test',
             'business_name' => 'Test Co',
@@ -147,6 +149,8 @@ class SecurityHardeningTest extends TestCase
 
     public function test_registration_accepts_10_char_passwords(): void
     {
+        config(['auth.allow_registration' => true]);
+
         $this->post('/register', [
             'name' => 'Test',
             'business_name' => 'Test Co',
@@ -586,5 +590,22 @@ class SecurityHardeningTest extends TestCase
         $location = $response->headers->get('Location', '');
         $this->assertStringContainsString('confirm-password', $location,
             'Admin route must redirect to password confirmation when not recently confirmed.');
+    }
+
+    public function test_merchant_cannot_use_manual_payment_override_route(): void
+    {
+        $merchant = $this->merchant();
+        $order = $this->order($merchant);
+
+        $this->actingAs($merchant)
+            ->post(route('admin.orders.manual-payment-override', $order), [
+                'amount' => '100.00',
+                'verification_reference' => 'BANKREF123456',
+                'reason' => 'Independent bank statement reviewed by administrator.',
+            ])
+            ->assertForbidden();
+
+        $this->assertSame(Order::PENDING, $order->fresh()->status);
+        $this->assertDatabaseMissing('admin_audit_logs', ['subject_id' => $order->id]);
     }
 }

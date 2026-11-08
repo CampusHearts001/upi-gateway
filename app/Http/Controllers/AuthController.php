@@ -79,11 +79,15 @@ class AuthController extends Controller
 
     public function showRegister()
     {
+        abort_unless(config('auth.allow_registration', false), 404);
+
         return view('auth.register');
     }
 
     public function register(Request $request)
     {
+        abort_unless(config('auth.allow_registration', false), 404);
+
         $data = $request->validate([
             'name' => ['required', 'string', 'max:100'],
             'business_name' => ['required', 'string', 'max:100'],

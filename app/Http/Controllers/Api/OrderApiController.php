@@ -47,14 +47,15 @@ class OrderApiController extends Controller
 
     /**
      * Accepts our order ID or the merchant's client_order_id.
+     * Prioritizes exact order_no match before falling back to client_order_id.
      */
     public function show(Request $request, string $orderNo)
     {
         $environment = $request->attributes->get('payment_environment', Order::LIVE);
-        $order = $request->user()->orders()
-            ->where('environment', $environment)
-            ->where(fn ($q) => $q->where('order_no', $orderNo)->orWhere('client_order_id', $orderNo))
-            ->firstOrFail();
+        $baseQuery = $request->user()->orders()->where('environment', $environment);
+
+        $order = (clone $baseQuery)->where('order_no', $orderNo)->first()
+            ?? (clone $baseQuery)->where('client_order_id', $orderNo)->firstOrFail();
 
         $order = $this->orders->check($order);
 

@@ -21,15 +21,25 @@
                     <x-copy :text="$user->api_key" />
                 </div>
             </div>
-            <div>
-                <label class="label">API secret</label>
-                <div class="flex gap-2">
-                    <input id="secret" type="password" readonly value="{{ $user->api_secret }}" class="input font-mono bg-slate-50">
-                    <button type="button" class="btn btn-secondary btn-sm" data-toggle-secret><x-icon name="eye" class="w-4 h-4" /> Reveal</button>
-                    <x-copy :text="$user->api_secret" />
+            @if (session('live_api_secret_once_encrypted'))
+                @php $liveSecretOnce = Crypt::decryptString(session('live_api_secret_once_encrypted')); @endphp
+                <div class="rounded-lg bg-emerald-50 p-4 ring-1 ring-emerald-300 space-y-2">
+                    <label class="label text-emerald-900 font-semibold">Live API secret · copy now (will not be shown again)</label>
+                    <div class="flex gap-2">
+                        <input id="secret" readonly value="{{ $liveSecretOnce }}" class="input font-mono bg-white text-emerald-950 font-semibold">
+                        <x-copy :text="$liveSecretOnce" />
+                    </div>
+                    <p class="text-xs text-emerald-800">Store this secret securely on your server. It is also used to sign webhooks (HMAC-SHA256).</p>
                 </div>
-                <p class="help">Also used to sign webhooks (HMAC-SHA256).</p>
-            </div>
+            @else
+                <div>
+                    <label class="label">API secret</label>
+                    <div class="flex gap-2">
+                        <input type="text" readonly value="••••••••••••••••••••••••••••••••••••••••" class="input font-mono bg-slate-50 text-slate-400 select-none" disabled>
+                    </div>
+                    <p class="help">Hidden for security. If you lost your secret, click "Regenerate" below to issue a new pair.</p>
+                </div>
+            @endif
             <div class="flex items-center justify-between gap-4 rounded-lg bg-red-50/60 ring-1 ring-red-100 px-4 py-3">
                 <div class="text-sm text-red-800"><b>Regenerate keys</b><div class="text-xs text-red-700/80">Old keys stop working immediately.</div></div>
                 <form method="POST" action="{{ route('settings.regenerate') }}">@csrf
@@ -86,9 +96,35 @@
             <form method="POST" action="{{ route('settings.sandbox.webhook') }}" class="border-t border-slate-100 pt-5">
                 @csrf
                 <x-input name="sandbox_webhook_url" label="Sandbox webhook endpoint" type="url" :value="$user->sandbox_webhook_url" placeholder="https://sandbox.yoursite.com/webhook" class="font-mono"
-                    help="Must differ from the Live webhook URL. TEST events are signed only with the Sandbox secret." />
+                    help="Must differ from the Live webhook URL. TEST events are signed only with the Sandbox webhook secret." />
                 <div class="flex justify-end"><button class="btn btn-primary">Save Sandbox webhook</button></div>
             </form>
+
+            <div class="border-t border-slate-100 pt-5 space-y-3">
+                <label class="label">Sandbox Webhook Signing Secret</label>
+                @if (session('sandbox_webhook_secret_once_encrypted'))
+                    @php $sbWhSecretOnce = Crypt::decryptString(session('sandbox_webhook_secret_once_encrypted')); @endphp
+                    <div class="rounded-lg bg-amber-50 p-4 ring-1 ring-amber-300">
+                        <label class="label text-amber-900 font-semibold">Sandbox Webhook Secret · copy now (shown once)</label>
+                        <div class="flex gap-2">
+                            <input readonly value="{{ $sbWhSecretOnce }}" class="input font-mono bg-white text-amber-950 font-semibold">
+                            <x-copy :text="$sbWhSecretOnce" />
+                        </div>
+                        <p class="mt-2 text-xs font-medium text-amber-800">Copy this now. It cannot be retrieved after leaving this page.</p>
+                    </div>
+                @else
+                    <div class="flex gap-2">
+                        <input type="text" readonly value="{{ $user->sandbox_webhook_secret ? '••••••••••••••••••••••••••••••••••••••••' : 'Using Sandbox API secret (fallback)' }}" class="input font-mono bg-amber-50/50 text-slate-500 select-none" disabled>
+                    </div>
+                    <p class="help">Dedicated secret used to sign sandbox webhooks (separate from API authentication keys).</p>
+                @endif
+                <div class="flex justify-end">
+                    <form method="POST" action="{{ route('settings.sandbox.regenerate-webhook-secret') }}">
+                        @csrf
+                        <button data-confirm="Generate a new Sandbox webhook signing secret?" class="btn btn-secondary btn-sm"><x-icon name="refresh" class="w-4 h-4" /> Regenerate Sandbox Secret</button>
+                    </form>
+                </div>
+            </div>
         </div>
     </section>
 
@@ -98,12 +134,40 @@
             <h2 class="text-base font-semibold text-slate-900">Webhook</h2>
             <p class="mt-1 text-sm text-slate-500">We POST <span class="kbd">order.paid</span> and <span class="kbd">order.expired</span> events here, retrying up to 6 times.</p>
         </div>
-        <form method="POST" action="{{ route('settings.webhook') }}" class="card p-6 lg:col-span-2">
-            @csrf
-            <x-input name="webhook_url" label="Endpoint URL" type="url" :value="$user->webhook_url" placeholder="https://yoursite.com/upi/webhook" class="font-mono"
-                help="Verify the X-Signature header on every request. See the API docs for sample code." />
-            <div class="flex justify-end"><button class="btn btn-primary">Save webhook</button></div>
-        </form>
+        <div class="card p-6 lg:col-span-2 space-y-5">
+            <form method="POST" action="{{ route('settings.webhook') }}">
+                @csrf
+                <x-input name="webhook_url" label="Endpoint URL" type="url" :value="$user->webhook_url" placeholder="https://yoursite.com/upi/webhook" class="font-mono"
+                    help="Verify the X-Signature header on every request. See the API docs for sample code." />
+                <div class="flex justify-end"><button class="btn btn-primary">Save webhook</button></div>
+            </form>
+
+            <div class="border-t border-slate-100 pt-5 space-y-3">
+                <label class="label">Dedicated Webhook Signing Secret</label>
+                @if (session('live_webhook_secret_once_encrypted'))
+                    @php $liveWhSecretOnce = Crypt::decryptString(session('live_webhook_secret_once_encrypted')); @endphp
+                    <div class="rounded-lg bg-emerald-50 p-4 ring-1 ring-emerald-300">
+                        <label class="label text-emerald-900 font-semibold">Live Webhook Secret · copy now (shown once)</label>
+                        <div class="flex gap-2">
+                            <input readonly value="{{ $liveWhSecretOnce }}" class="input font-mono bg-white text-emerald-950 font-semibold">
+                            <x-copy :text="$liveWhSecretOnce" />
+                        </div>
+                        <p class="mt-2 text-xs font-medium text-emerald-800">Copy this now. It cannot be retrieved after leaving this page.</p>
+                    </div>
+                @else
+                    <div class="flex gap-2">
+                        <input type="text" readonly value="{{ $user->webhook_secret ? '••••••••••••••••••••••••••••••••••••••••' : 'Using Live API secret (fallback)' }}" class="input font-mono bg-slate-50 text-slate-500 select-none" disabled>
+                    </div>
+                    <p class="help">Dedicated secret used to sign Live webhooks (separate from API authentication keys).</p>
+                @endif
+                <div class="flex justify-end">
+                    <form method="POST" action="{{ route('settings.regenerate-webhook-secret') }}">
+                        @csrf
+                        <button data-confirm="Generate a new Live webhook signing secret?" class="btn btn-secondary btn-sm"><x-icon name="refresh" class="w-4 h-4" /> Regenerate Webhook Secret</button>
+                    </form>
+                </div>
+            </div>
+        </div>
     </section>
 
     {{-- Profile --}}

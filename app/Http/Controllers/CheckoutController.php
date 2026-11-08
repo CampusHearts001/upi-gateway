@@ -19,7 +19,8 @@ class CheckoutController extends Controller
     public function show(Order $order)
     {
         $this->assertLive($order);
-        if ($order->isPending() && ($order->expires_at === null || $order->isPastExpiry())) {
+        if (($order->isPending() && ($order->expires_at === null || $order->isPastExpiry()))
+            || $order->canRecoverLatePayment()) {
             $order = $this->orders->check($order);
         }
 
@@ -77,17 +78,26 @@ class CheckoutController extends Controller
         try {
             $checkout = DB::transaction(function () use ($order) {
                 $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
-                $locked->load('paymentAccount');
+                $account = $locked->paymentAccount()->lockForUpdate()->firstOrFail();
+                $account->assertCompatibleWithOrder($locked);
+                abort_unless($locked->environment === Order::LIVE, 404);
+                $locked->setRelation('paymentAccount', $account);
 
                 if (! $locked->isPending() || $locked->expires_at === null || $locked->isPastExpiry()) {
                     return null;
                 }
 
                 $checkout = $locked->provider_checkout;
-                if (! $checkout || ($checkout['expires_at'] ?? 0) <= now()->timestamp + 30) {
+                if (! $checkout || ($checkout['expires_at'] ?? 0) <= now()->timestamp + 30
+                    || ($checkout['payment_account_id'] ?? null) !== $account->id
+                    || ($checkout['payment_environment'] ?? null) !== Order::LIVE
+                    || ($checkout['provider'] ?? null) !== $account->provider) {
                     $verifier = $locked->paymentAccount->verifier();
                     $checkout = $verifier->startCheckout($locked, route('pay.return', $locked));
                     $this->validateCheckout($checkout);
+                    $checkout['payment_account_id'] = $account->id;
+                    $checkout['payment_environment'] = Order::LIVE;
+                    $checkout['provider'] = $account->provider;
                     $locked->forceFill(['provider_checkout' => $checkout])->save();
                 }
 
@@ -191,5 +201,8 @@ class CheckoutController extends Controller
     private function assertLive(Order $order): void
     {
         abort_unless($order->environment === Order::LIVE, 404);
+        $order->load('paymentAccount');
+        abort_unless($order->paymentAccount, 422, 'A matching payment account is required.');
+        $order->paymentAccount->assertCompatibleWithOrder($order);
     }
 }

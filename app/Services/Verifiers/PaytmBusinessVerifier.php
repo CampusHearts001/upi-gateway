@@ -16,6 +16,10 @@ class PaytmBusinessVerifier implements Verifier
 {
     public function check(Order $order): VerificationResult
     {
+        $order->load('paymentAccount');
+        $order->paymentAccount?->assertLiveProviderOrder($order, 'paytm_business');
+        abort_unless($order->paymentAccount, 422, 'A matching payment account is required.');
+
         $mid = $order->paymentAccount->credential('mid');
         if (! $mid) {
             return VerificationResult::pending(['error' => 'Paytm MID not configured']);
@@ -52,11 +56,13 @@ class PaytmBusinessVerifier implements Verifier
         }
 
         // Never trust status alone: the amount paid must match the order exactly.
-        if ($this->toPaise($data['TXNAMOUNT'] ?? 0) !== $this->toPaise($order->amount)) {
+        if (! is_numeric($data['TXNAMOUNT'] ?? null)
+            || ! preg_match('/^\d+(?:\.\d{1,2})?$/', (string) $data['TXNAMOUNT'])
+            || $this->toPaise($data['TXNAMOUNT']) !== $this->toPaise($order->amount)) {
             Log::warning('Paytm amount mismatch', [
                 'order_id' => $order->order_no,
                 'expected_paise' => $this->toPaise($order->amount),
-                'got_paise' => $this->toPaise($data['TXNAMOUNT'] ?? 0),
+                'got_paise' => is_numeric($data['TXNAMOUNT'] ?? null) ? $this->toPaise($data['TXNAMOUNT']) : null,
                 'status' => $data['STATUS'] ?? null,
                 // Omit full provider response — may contain PII or credentials.
             ]);
@@ -64,10 +70,30 @@ class PaytmBusinessVerifier implements Verifier
             return VerificationResult::pending(['error' => 'Amount mismatch']);
         }
 
-        return VerificationResult::paid(
+        if (($data['CURRENCY'] ?? 'INR') !== 'INR') {
+            return VerificationResult::pending(['error' => 'Currency mismatch']);
+        }
+        if (trim((string) ($data['BANKTXNID'] ?? '')) === '' && trim((string) ($data['TXNID'] ?? '')) === '') {
+            return VerificationResult::pending(['error' => 'Missing transaction reference']);
+        }
+
+        $occurredAt = VerificationResult::extractRawTimestamp('paytm_business', $data);
+        if ($occurredAt === null && (bool) config('gateway.evidence_require_timestamp', true)) {
+            Log::warning('Paytm Business transaction missing or invalid timestamp', [
+                'order_id' => $order->order_no,
+            ]);
+
+            return VerificationResult::pending(['error' => 'Missing or invalid provider transaction timestamp']);
+        }
+
+        return VerificationResult::fromPaytmBusiness(
+            order: $order,
+            amount: $data['TXNAMOUNT'],
             utr: $data['BANKTXNID'] ?? null,
             txnId: $data['TXNID'] ?? null,
             raw: $data,
+            currency: $data['CURRENCY'] ?? 'INR',
+            occurredAt: $occurredAt,
         );
     }
 

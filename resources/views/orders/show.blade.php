@@ -14,7 +14,7 @@
         'Payment account' => [$order->paymentAccount ? $order->paymentAccount->label.' · '.($order->paymentAccount->upi_id ?? $order->paymentAccount->providerLabel()) : 'Internal TEST simulator', false],
         'Verification' => [$order->paymentAccount?->providerLabel() ?? 'Sandbox simulation', false],
         'UTR' => [$order->utr, true],
-        'Customer-submitted UTR' => [$order->customer_utr ? $order->customer_utr.($order->utr_attempts > 1 ? " (attempt {$order->utr_attempts})" : '') : null, true],
+        'Customer-submitted UTR' => [$order->customer_utr ? ($order->status === 'review' ? '••••••••'.substr($order->customer_utr, -4) : $order->customer_utr).($order->utr_attempts > 1 ? " (attempt {$order->utr_attempts})" : '') : null, true],
         'Provider txn ID' => [$order->provider_txn_id, true],
         'Customer name' => [$order->customer_name, false],
         'Customer mobile' => [$order->customer_mobile, false],
@@ -23,7 +23,8 @@
     ];
     $timeline = [['Order created', $order->created_at, 'plus', 'bg-slate-100 text-slate-600']];
     if ($order->utr_submitted_at) {
-        $timeline[] = ['Customer submitted UTR '.$order->customer_utr, $order->utr_submitted_at, 'receipt', 'bg-sky-100 text-sky-700'];
+        $submittedUtrLabel = $order->status === 'review' ? '••••••••'.substr($order->customer_utr, -4) : $order->customer_utr;
+        $timeline[] = ['Customer submitted UTR '.$submittedUtrLabel, $order->utr_submitted_at, 'receipt', 'bg-sky-100 text-sky-700'];
     }
     if ($order->review_note && $order->status !== 'paid') {
         $timeline[] = ['UTR rejected: '.$order->review_note, null, 'x', 'bg-red-100 text-red-700'];
@@ -123,23 +124,43 @@
                     <div class="rounded-lg bg-slate-50 ring-1 ring-slate-200 p-4">
                         <div class="text-xs text-slate-500">Customer says they paid</div>
                         <div class="mt-1 text-2xl font-bold text-slate-900 tabular-nums">₹{{ number_format($order->amount, 2) }}</div>
-                        <div class="mt-3 text-xs text-slate-500">with UTR</div>
-                        <div class="mt-1 font-mono text-lg font-semibold tracking-wider text-slate-900">{{ $order->customer_utr }}</div>
+                        <div class="mt-3 text-xs text-slate-500">with UTR ending in</div>
+                        <div class="mt-1 font-mono text-lg font-semibold tracking-wider text-slate-900">••••••••{{ substr($order->customer_utr, -4) }}</div>
                         <div class="mt-3 text-xs text-slate-500">to <span class="font-mono">{{ $order->paymentAccount->upi_id }}</span> · {{ $order->utr_submitted_at?->diffForHumans() }}</div>
                     </div>
 
-                    <form method="POST" action="{{ route('orders.approve-utr', $order) }}" class="mt-5">
+                    <div class="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+                        <div class="flex items-start gap-2.5">
+                            <x-icon name="alert" class="mt-0.5 w-5 h-5 shrink-0 text-amber-600" />
+                            <div>
+                                <span class="font-bold">FRAUD WARNING: Independent Bank Verification Required</span>
+                                <p class="mt-1 text-xs text-amber-900 leading-relaxed">
+                                    Never treat customer-submitted references as proof of payment. Fraudulent customers frequently submit fake, guessed, or duplicate UTRs. You MUST independently open your official bank or UPI app, verify that ₹{{ number_format($order->amount, 2) }} was genuinely credited, and enter the bank statement details below.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <form method="POST" action="{{ route('orders.approve-utr', $order) }}" class="mt-5 space-y-4">
                         @csrf
-                        <label for="bank_utr" class="label">UTR in your bank / UPI app</label>
-                        <p class="text-xs text-slate-500 -mt-1 mb-2">Open your bank or UPI app, find a <b>₹{{ number_format($order->amount, 2) }}</b> credit and type its UTR. It must match exactly.</p>
-                        <input id="bank_utr" name="bank_utr" inputmode="numeric" autocomplete="off" required placeholder="12-digit UTR" class="input font-mono tracking-wider mb-3 @error('bank_utr') ring-red-400 @enderror">
-                        @error('bank_utr')<p class="-mt-2 mb-3 text-xs text-red-600">{{ $message }}</p>@enderror
-                        <button class="btn btn-success w-full"><x-icon name="check" class="w-4 h-4" /> Match &amp; approve</button>
+                        <div>
+                            <label for="bank_utr" class="block text-xs font-bold uppercase tracking-wider text-slate-700">Bank-Verified 12-Digit UTR</label>
+                            <input type="text" id="bank_utr" name="bank_utr" maxlength="14" inputmode="numeric" required placeholder="Enter full 12-digit UTR from your bank statement" class="input mt-1 font-mono tracking-wider w-full" value="{{ old('bank_utr') }}">
+                            @error('bank_utr')<p class="text-xs text-red-600 mt-1">{{ $message }}</p>@enderror
+                        </div>
+                        <div>
+                            <label for="received_amount" class="block text-xs font-bold uppercase tracking-wider text-slate-700">Actual Amount Credited (₹)</label>
+                            <input type="number" id="received_amount" name="received_amount" step="0.01" min="0.01" required placeholder="Exact amount from bank statement" class="input mt-1 tabular-nums w-full" value="{{ old('received_amount') }}">
+                            @error('received_amount')<p class="text-xs text-red-600 mt-1">{{ $message }}</p>@enderror
+                        </div>
+                        <button class="btn btn-primary w-full" data-confirm="Confirm that you independently verified this payment in your bank statement?">
+                            <x-icon name="check" class="w-4 h-4" /> Verify from Bank & Approve Payment
+                        </button>
                     </form>
 
                     <form method="POST" action="{{ route('orders.reject-utr', $order) }}" class="mt-5 pt-5 border-t border-slate-100">
                         @csrf
-                        <div class="text-sm font-semibold text-slate-900">Payment not found?</div>
+                        <div class="text-sm font-semibold text-slate-900">Payment not found in bank?</div>
                         <p class="text-xs text-slate-500 mt-1 mb-3">
                             @if ($order->utr_attempts < \App\Models\Order::MAX_UTR_ATTEMPTS)
                                 The customer will be asked to check and resubmit ({{ \App\Models\Order::MAX_UTR_ATTEMPTS - $order->utr_attempts }} {{ Str::plural('attempt', \App\Models\Order::MAX_UTR_ATTEMPTS - $order->utr_attempts) }} left).
@@ -161,13 +182,9 @@
                         <button class="btn btn-secondary w-full"><x-icon name="refresh" class="w-4 h-4" /> Re-check status with provider</button>
                     </form>
 
-                    <form method="POST" action="{{ route('orders.mark-paid', $order) }}" class="pt-5 border-t border-slate-100">
-                        @csrf
-                        <div class="text-sm font-semibold text-slate-900">Mark as paid manually</div>
-                        <p class="text-xs text-slate-500 mt-1 mb-3">Only after you see <b>₹{{ number_format($order->amount, 2) }}</b> credited in your bank or UPI app.</p>
-                        <input name="utr" required placeholder="12-digit UTR / reference no." class="input font-mono mb-3">
-                        <button data-confirm="Confirm you have received ₹{{ number_format($order->amount, 2) }} for this order?" class="btn btn-success w-full"><x-icon name="check" class="w-4 h-4" /> Mark as paid</button>
-                    </form>
+                    <div class="border-t border-slate-100 pt-5 text-sm text-slate-600">
+                        Manual payment confirmation is disabled for merchants. Use the provider re-check above; administrator overrides require separate audited authorization.
+                    </div>
                 </div>
             </div>
         @endif

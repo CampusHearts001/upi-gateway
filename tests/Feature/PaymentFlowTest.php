@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Jobs\SendWebhook;
 use App\Models\Order;
 use App\Models\User;
+use App\Services\WebhookOutboxDispatcher;
+use App\Support\WebhookSignature;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Facades\Http;
@@ -36,6 +38,8 @@ class PaymentFlowTest extends TestCase
 
     public function test_register_and_add_upi_account(): void
     {
+        config(['auth.allow_registration' => true]);
+
         $this->post('/register', [
             'name' => 'Asha', 'business_name' => 'Asha Foods', 'email' => 'asha@example.com',
             'password' => 'password123', 'password_confirmation' => 'password123',
@@ -83,7 +87,7 @@ class PaymentFlowTest extends TestCase
         // Not paid yet.
         Http::fake(['securegw.paytm.in/*' => Http::sequence()
             ->push(['STATUS' => 'TXN_FAILURE', 'RESPMSG' => 'Invalid Order Id'])
-            ->push(['STATUS' => 'TXN_SUCCESS', 'TXNAMOUNT' => '199.50', 'BANKTXNID' => '412345678901', 'TXNID' => 'T1', 'ORDERID' => $orderNo]),
+            ->push(['STATUS' => 'TXN_SUCCESS', 'TXNAMOUNT' => '199.50', 'BANKTXNID' => '412345678901', 'TXNID' => 'T1', 'ORDERID' => $orderNo, 'TXNDATE' => now()->format('Y-m-d H:i:s')]),
             'merchant.test/*' => Http::response('ok'),
         ]);
 
@@ -100,8 +104,9 @@ class PaymentFlowTest extends TestCase
             && str_contains(urldecode($r->url()), '"MID":"TESTMID123"'));
 
         // Webhook (sync queue in tests) is signed with the API secret.
+        app(WebhookOutboxDispatcher::class)->dispatchDue();
         Http::assertSent(fn (HttpRequest $r) => $r->url() === 'https://merchant.test/hook'
-            && $r->header('X-Signature')[0] === hash_hmac('sha256', $r->body(), $user->api_secret)
+            && WebhookSignature::verify($r->body(), $r->header('X-Signature')[0], $user->api_secret)
             && $r['event'] === 'order.paid');
         $this->assertTrue($order->webhookLogs()->first()->success);
 
@@ -133,12 +138,13 @@ class PaymentFlowTest extends TestCase
         $this->travel(20)->minutes();
         $this->artisan('orders:check-pending')->assertSuccessful();
         $this->assertSame('expired', Order::where('order_no', $orderNo)->value('status'));
+        app(WebhookOutboxDispatcher::class)->dispatchDue();
         Queue::assertPushed(SendWebhook::class, fn ($job) => $job->event === 'order.expired');
 
-        // Merchant later finds the credit and confirms it by hand.
-        $this->actingAs($user)->post("/orders/{$orderNo}/mark-paid", ['utr' => '998877665544'])->assertRedirect();
-        $this->assertSame('paid', Order::where('order_no', $orderNo)->value('status'));
-        Queue::assertPushed(SendWebhook::class, fn ($job) => $job->event === 'order.paid');
+        // Merchant-submitted UTR is never sufficient to mark a Live order paid.
+        $this->actingAs($user)->post("/orders/{$orderNo}/mark-paid", ['utr' => '998877665544'])
+            ->assertRedirect()->assertSessionHasErrors('utr');
+        $this->assertSame('expired', Order::where('order_no', $orderNo)->value('status'));
     }
 
     public function test_merchant_cannot_see_other_merchants_orders(): void

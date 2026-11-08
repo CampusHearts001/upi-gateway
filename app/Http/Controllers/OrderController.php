@@ -89,34 +89,25 @@ class OrderController extends Controller
     {
         $this->authorizeOwnerOnly($request, $order);
 
-        $data = $request->validate([
-            'utr' => ['required', 'string', 'regex:/^[A-Za-z0-9]{6,40}$/'],
-        ], ['utr.regex' => 'Enter the UTR / reference number from the payment.']);
-
-        if (in_array($order->status, [Order::PAID, Order::REVIEW])) {
-            return back()->withErrors(['utr' => $order->status === Order::PAID
-                ? 'Order is already paid.'
-                : 'The customer submitted a UTR. Approve or reject it instead.']);
-        }
-
-        $utr = $this->orders->normalizeUtr($data['utr']);
-        $this->orders->ensureUtrUnused($order, $utr);
-        $this->orders->markPaid($order, $utr, null, [], 'manual');
-
-        return back()->with('status', 'Order marked as paid.');
+        return back()->withErrors(['utr' => 'Merchant-side manual payment confirmation is disabled. Use provider verification or administrator review.']);
     }
 
     public function approveUtr(Request $request, Order $order)
     {
         $this->authorizeOwnerOnly($request, $order);
-
-        $data = $request->validate(['bank_utr' => ['required', 'string', 'max:40']], [
-            'bank_utr.required' => 'Type the UTR you see in your bank/UPI app to confirm.',
+        if ($request->has('bank_utr')) {
+            $request->merge(['bank_utr' => preg_replace('/\s+/', '', (string) $request->input('bank_utr'))]);
+        }
+        $data = $request->validate([
+            'bank_utr' => ['required', 'string', 'regex:/^\d{12}$/'],
+            'received_amount' => ['required', 'numeric', 'min:0.01'],
+        ], [
+            'bank_utr.regex' => 'The bank-verified UTR must be the 12-digit number from your bank statement.',
         ]);
 
-        $this->orders->approveCustomerUtr($order, $data['bank_utr']);
+        $this->orders->approveCustomerUtr($order, $data['bank_utr'], (float) $data['received_amount']);
 
-        return back()->with('status', 'UTR matched. Payment approved and order marked as paid.');
+        return back()->with('status', 'Payment verified from bank statement and marked as paid.');
     }
 
     public function rejectUtr(Request $request, Order $order)

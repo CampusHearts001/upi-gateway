@@ -19,6 +19,10 @@ class PhonePePgVerifier implements HostedCheckout, Verifier
 {
     public function startCheckout(Order $order, string $returnUrl): array
     {
+        $order->load('paymentAccount');
+        $order->paymentAccount?->assertLiveProviderOrder($order, 'phonepe_pg');
+        abort_unless($order->paymentAccount, 422, 'A matching payment account is required.');
+
         $secondsLeft = (int) now()->diffInSeconds($order->expires_at, false);
 
         $response = $this->request(
@@ -58,6 +62,10 @@ class PhonePePgVerifier implements HostedCheckout, Verifier
 
     public function check(Order $order): VerificationResult
     {
+        $order->load('paymentAccount');
+        $order->paymentAccount?->assertLiveProviderOrder($order, 'phonepe_pg');
+        abort_unless($order->paymentAccount, 422, 'A matching payment account is required.');
+
         try {
             $response = $this->request(
                 $order->paymentAccount,
@@ -88,7 +96,8 @@ class PhonePePgVerifier implements HostedCheckout, Verifier
             return VerificationResult::pending(['error' => 'Order ID mismatch']);
         }
 
-        if ((int) ($data['amount'] ?? 0) !== $this->toPaise($order->amount)) {
+        if (! ctype_digit((string) ($data['amount'] ?? ''))
+            || (int) $data['amount'] !== $this->toPaise($order->amount)) {
             Log::warning('PhonePe amount mismatch', [
                 'order_id' => $order->order_no,
                 'expected_paise' => $this->toPaise($order->amount),
@@ -102,10 +111,31 @@ class PhonePePgVerifier implements HostedCheckout, Verifier
 
         $payment = collect($data['paymentDetails'] ?? [])->firstWhere('state', 'COMPLETED') ?? [];
 
-        return VerificationResult::paid(
+        if (($data['currency'] ?? 'INR') !== 'INR') {
+            return VerificationResult::pending(['error' => 'Currency mismatch']);
+        }
+        if (trim((string) ($payment['rail']['utr'] ?? '')) === ''
+            && trim((string) ($payment['transactionId'] ?? ($data['orderId'] ?? ''))) === '') {
+            return VerificationResult::pending(['error' => 'Missing transaction reference']);
+        }
+
+        $occurredAt = VerificationResult::extractRawTimestamp('phonepe_pg', $data);
+        if ($occurredAt === null && (bool) config('gateway.evidence_require_timestamp', true)) {
+            Log::warning('PhonePe PG transaction missing or invalid timestamp', [
+                'order_id' => $order->order_no,
+            ]);
+
+            return VerificationResult::pending(['error' => 'Missing or invalid provider transaction timestamp']);
+        }
+
+        return VerificationResult::fromPhonePePg(
+            order: $order,
+            amount: ((int) $data['amount']) / 100,
             utr: $payment['rail']['utr'] ?? null,
             txnId: $payment['transactionId'] ?? ($data['orderId'] ?? null),
             raw: $data,
+            currency: $data['currency'] ?? 'INR',
+            occurredAt: $occurredAt,
         );
     }
 

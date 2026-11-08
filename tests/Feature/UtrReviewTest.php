@@ -6,6 +6,7 @@ use App\Jobs\SendWebhook;
 use App\Models\Order;
 use App\Models\User;
 use App\Services\OrderService;
+use App\Services\WebhookOutboxDispatcher;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
@@ -43,6 +44,7 @@ class UtrReviewTest extends TestCase
         $this->assertSame('412345678901', $order->customer_utr);
         $this->assertNull($order->utr);
         $this->assertNull($order->paid_at);
+        app(WebhookOutboxDispatcher::class)->dispatchDue();
         Queue::assertPushed(SendWebhook::class, fn ($j) => $j->event === 'order.under_review');
         Queue::assertNotPushed(SendWebhook::class, fn ($j) => $j->event === 'order.paid');
 
@@ -65,26 +67,52 @@ class UtrReviewTest extends TestCase
         $this->assertSame(Order::PENDING, $order->fresh()->status);
     }
 
-    public function test_merchant_approves_only_when_utr_matches(): void
+    public function test_merchant_approves_only_when_utr_matches_and_amount_verified(): void
     {
-        $order = $this->order();
+        $order = $this->order(499.00);
         $this->post(route('pay.utr', $order), ['utr' => '412345678901']);
         $this->actingAs($this->merchant);
 
-        // Wrong UTR from bank app: not approved.
-        $this->post(route('orders.approve-utr', $order), ['bank_utr' => '999999999999'])->assertSessionHasErrors('bank_utr');
+        // Missing received amount: validation failure
+        $this->post(route('orders.approve-utr', $order), ['bank_utr' => '412345678901'])
+            ->assertSessionHasErrors('received_amount');
         $this->assertSame(Order::REVIEW, $order->fresh()->status);
 
-        // Matching UTR (spaces tolerated): approved.
-        $this->post(route('orders.approve-utr', $order), ['bank_utr' => ' 4123 4567 8901 '])->assertSessionHasNoErrors();
+        // Wrong amount: validation failure
+        $this->post(route('orders.approve-utr', $order), [
+            'bank_utr' => '412345678901',
+            'received_amount' => 100.00,
+        ])->assertSessionHasErrors('received_amount');
+        $this->assertSame(Order::REVIEW, $order->fresh()->status);
 
-        $order->refresh();
-        $this->assertSame(Order::PAID, $order->status);
-        $this->assertSame('412345678901', $order->utr);
-        $this->assertSame('utr_review', $order->verified_by);
+        // Wrong UTR from bank app: not approved.
+        $this->post(route('orders.approve-utr', $order), [
+            'bank_utr' => '999999999999',
+            'received_amount' => 499.00,
+        ])->assertSessionHasErrors('bank_utr');
+        $this->assertSame(Order::REVIEW, $order->fresh()->status);
+
+        // Copied partial UTR (e.g. only 4 digits): regex validation failure
+        $this->post(route('orders.approve-utr', $order), [
+            'bank_utr' => '8901',
+            'received_amount' => 499.00,
+        ])->assertSessionHasErrors('bank_utr');
+        $this->assertSame(Order::REVIEW, $order->fresh()->status);
+
+        // Correct matching UTR and exact verified amount: approved and marked PAID
+        $this->post(route('orders.approve-utr', $order), [
+            'bank_utr' => ' 4123 4567 8901 ',
+            'received_amount' => 499.00,
+        ])->assertSessionHasNoErrors();
+
+        $fresh = $order->fresh();
+        $this->assertSame(Order::PAID, $fresh->status);
+        $this->assertSame('412345678901', $fresh->utr);
+        $this->assertSame('utr_review', $fresh->verified_by);
+        $this->assertNotNull($fresh->paid_at);
+
+        app(WebhookOutboxDispatcher::class)->dispatchDue();
         Queue::assertPushed(SendWebhook::class, fn ($j) => $j->event === 'order.paid');
-
-        $this->get(route('pay.show', $order))->assertSee('Payment successful');
     }
 
     public function test_reject_lets_customer_retry_then_expires_after_three_attempts(): void
@@ -123,7 +151,10 @@ class UtrReviewTest extends TestCase
         $this->post(route('pay.utr', $second), ['utr' => '412345678901'])->assertSessionHasErrors('utr');
 
         // ...and after it is approved.
-        $this->actingAs($this->merchant)->post(route('orders.approve-utr', $first), ['bank_utr' => '412345678901']);
+        $this->actingAs($this->merchant)->post(route('orders.approve-utr', $first), [
+            'bank_utr' => '412345678901',
+            'received_amount' => 499.00,
+        ]);
         $this->post(route('pay.utr', $second), ['utr' => '412345678901'])->assertSessionHasErrors('utr');
 
         // Merchant can't reuse it via manual mark-paid either.
@@ -165,7 +196,10 @@ class UtrReviewTest extends TestCase
         $this->post(route('pay.utr', $order), ['utr' => '412345678901']);
 
         $other = User::create(['name' => 'X', 'email' => 'x@example.com', 'password' => 'password123']);
-        $this->actingAs($other)->post(route('orders.approve-utr', $order), ['bank_utr' => '412345678901'])->assertNotFound();
+        $this->actingAs($other)->post(route('orders.approve-utr', $order), [
+            'bank_utr' => '412345678901',
+            'received_amount' => 499.00,
+        ])->assertNotFound();
         $this->assertSame(Order::REVIEW, $order->fresh()->status);
     }
 
@@ -175,8 +209,54 @@ class UtrReviewTest extends TestCase
         $this->post(route('pay.utr', $order), ['utr' => '412345678901']);
         $this->actingAs($this->merchant);
 
-        $this->get(route('orders.show', $order))->assertSee("Verify customer's payment", false)->assertSee('Match &amp; approve', false);
+        $this->get(route('orders.show', $order))
+            ->assertSee("Verify customer's payment", false)
+            ->assertSee('FRAUD WARNING: Independent Bank Verification Required', false)
+            ->assertSee('••••••••8901')
+            ->assertDontSee('412345678901');
         $this->get(route('dashboard'))->assertSee('1 payment waiting for your review');
         $this->get(route('orders.index', ['status' => 'review']))->assertSee($order->order_no)->assertSee('submitted by customer');
+    }
+
+    public function test_manual_utr_fraud_protection_workflow_guarantees(): void
+    {
+        $order = $this->order(250.00);
+        $this->post(route('pay.utr', $order), ['utr' => '987654321098']);
+
+        // 1. Unauthenticated approval attempt is blocked
+        $this->post(route('orders.approve-utr', $order), [
+            'bank_utr' => '987654321098',
+            'received_amount' => 250.00,
+        ])->assertRedirect(route('login'));
+
+        $this->actingAs($this->merchant);
+
+        // 2. Copied partial UTR (e.g. attempting to submit only visible 4 digits) fails
+        $this->post(route('orders.approve-utr', $order), [
+            'bank_utr' => '1098',
+            'received_amount' => 250.00,
+        ])->assertSessionHasErrors('bank_utr');
+
+        // 3. Wrong amount fails validation
+        $this->post(route('orders.approve-utr', $order), [
+            'bank_utr' => '987654321098',
+            'received_amount' => 200.00,
+        ])->assertSessionHasErrors('received_amount');
+
+        // 4. Duplicate UTR check: another order with same UTR cannot be approved
+        $first = $this->order(100.00);
+        $this->post(route('pay.utr', $first), ['utr' => '123456789012']);
+        $this->post(route('orders.approve-utr', $first), [
+            'bank_utr' => '123456789012',
+            'received_amount' => 100.00,
+        ])->assertSessionHasNoErrors();
+
+        $second = $this->order(100.00);
+        // Force status to review with same UTR
+        $second->forceFill(['status' => Order::REVIEW, 'customer_utr' => '123456789012'])->save();
+        $this->post(route('orders.approve-utr', $second), [
+            'bank_utr' => '123456789012',
+            'received_amount' => 100.00,
+        ])->assertSessionHasErrors('bank_utr');
     }
 }

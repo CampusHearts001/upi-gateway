@@ -6,6 +6,8 @@ use App\Jobs\SendWebhook;
 use App\Models\Order;
 use App\Models\User;
 use App\Services\OrderService;
+use App\Services\WebhookOutboxDispatcher;
+use App\Support\WebhookSignature;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Facades\Http;
@@ -190,7 +192,8 @@ class SandboxModeTest extends TestCase
         app(OrderService::class)->simulateSandbox($sandbox, 'success');
 
         $live = app(OrderService::class)->create($merchant, ['amount' => 100, 'client_order_id' => 'LIVE-TOTAL']);
-        app(OrderService::class)->markPaid($live, '123456789012', null, [], 'manual');
+        // A stored paid fixture tests reporting without authorizing a payment.
+        $live->forceFill(['status' => Order::PAID, 'paid_at' => now()])->save();
 
         $liveStats = $this->actingAs($merchant)->get(route('dashboard'))->viewData('stats');
         $sandboxResponse = $this->actingAs($merchant)->get(route('dashboard', ['environment' => 'sandbox']));
@@ -199,6 +202,21 @@ class SandboxModeTest extends TestCase
         $this->assertSame(100.0, $liveStats['total_amount']);
         $this->assertSame(500.0, $sandboxStats['total_amount']);
         $sandboxResponse->assertSee('SIMULATED DATA');
+    }
+
+    public function test_legacy_manual_service_arguments_cannot_mark_a_live_order_paid(): void
+    {
+        Queue::fake();
+        [$merchant] = $this->merchant();
+        $live = app(OrderService::class)->create($merchant, ['amount' => 100, 'client_order_id' => 'LEGACY']);
+
+        try {
+            app(OrderService::class)->markPaid($live, '123456789012', null, [], 'manual');
+            $this->fail('Legacy manual payment arguments must be rejected.');
+        } catch (\TypeError) {
+            $this->assertSame(Order::PENDING, $live->fresh()->status);
+        }
+        Queue::assertNotPushed(SendWebhook::class, fn ($job) => $job->event === 'order.paid');
     }
 
     public function test_sandbox_webhook_uses_only_sandbox_secret_and_is_marked_test(): void
@@ -220,10 +238,7 @@ class SandboxModeTest extends TestCase
             return $request->url() === 'https://sandbox.example/webhook'
                 && ($payload['data']['environment'] ?? null) === Order::SANDBOX
                 && ($payload['data']['test'] ?? false) === true
-                && hash_equals(
-                    hash_hmac('sha256', $request->body(), $secret),
-                    $request->header('X-Signature')[0]
-                );
+                && WebhookSignature::verify($request->body(), $request->header('X-Signature')[0], $secret);
         });
         Http::assertNotSent(fn (HttpRequest $request) => str_contains($request->url(), 'live.example'));
         $this->assertNotSame(
@@ -243,6 +258,7 @@ class SandboxModeTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonValidationErrors('outcome');
 
+        app(WebhookOutboxDispatcher::class)->dispatchDue();
         Queue::assertPushed(SendWebhook::class, 1);
         $this->assertSame(Order::PAID, $order->fresh()->status);
     }

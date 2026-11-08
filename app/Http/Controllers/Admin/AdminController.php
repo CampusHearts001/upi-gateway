@@ -6,10 +6,31 @@ use App\Http\Controllers\Controller;
 use App\Models\AdminAuditLog;
 use App\Models\Order;
 use App\Models\User;
+use App\Services\OrderService;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class AdminController extends Controller
 {
+    public function manualPaymentOverride(Request $request, Order $order, OrderService $orders)
+    {
+        $this->authorize('manual-payment-override');
+
+        $data = $request->validate([
+            'amount' => ['required', 'numeric', 'decimal:0,2', 'min:0.01'],
+            'verification_reference' => ['required', 'string', 'max:80', 'regex:/^[A-Za-z0-9_\-]{6,80}$/'],
+            'reason' => ['required', 'string', 'min:20', 'max:500'],
+        ]);
+
+        if (number_format((float) $data['amount'], 2, '.', '') !== number_format((float) $order->amount, 2, '.', '')) {
+            throw ValidationException::withMessages(['amount' => 'The confirmed amount must match the order amount exactly.']);
+        }
+
+        $orders->adminOverridePaid($order, $request->user(), strtoupper($data['verification_reference']), $data['reason'], (string) $request->ip(), (string) $data['amount']);
+
+        return back()->with('status', 'Administrator payment override recorded and audited.');
+    }
+
     public function merchants()
     {
         $merchants = User::where('role', 'merchant')

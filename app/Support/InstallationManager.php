@@ -2,8 +2,10 @@
 
 namespace App\Support;
 
+use App\Models\User;
 use Illuminate\Encryption\Encrypter;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use Throwable;
@@ -70,6 +72,9 @@ class InstallationManager
                 'webhook_logs',
                 'admin_audit_logs',
                 'installation_guards',
+                'webhook_outbox',
+                'verification_nodes',
+                'verification_lease_recovery_audits',
             ];
 
             foreach ($requiredTables as $table) {
@@ -82,6 +87,113 @@ class InstallationManager
         } catch (Throwable) {
             return false;
         }
+    }
+
+    /**
+     * Inspect system and directory requirements for browser/cPanel installation.
+     *
+     * @param  array<string, bool>  $overrides
+     * @return array<int, array{name: string, required: bool, pass: bool}>
+     */
+    public function checkRequirements(array $overrides = []): array
+    {
+        $storageDir = storage_path();
+        $cacheDir = storage_path('framework/cache');
+        $sessionsDir = storage_path('framework/sessions');
+        $viewsDir = storage_path('framework/views');
+        $logsDir = storage_path('logs');
+        $bootstrapCacheDir = base_path('bootstrap/cache');
+        $envFile = $this->envPath();
+        $envDir = dirname($envFile);
+
+        $checks = [
+            ['name' => 'PHP >= 8.2', 'required' => true, 'pass' => version_compare(PHP_VERSION, '8.2.0', '>=')],
+            ['name' => 'PDO Extension', 'required' => true, 'pass' => extension_loaded('pdo')],
+            ['name' => 'PDO MySQL (required)', 'required' => true, 'pass' => extension_loaded('pdo_mysql')],
+            ['name' => 'OpenSSL Extension', 'required' => true, 'pass' => extension_loaded('openssl')],
+            ['name' => 'Mbstring Extension', 'required' => true, 'pass' => extension_loaded('mbstring')],
+            ['name' => 'Tokenizer Extension', 'required' => true, 'pass' => extension_loaded('tokenizer')],
+            ['name' => 'JSON Extension', 'required' => true, 'pass' => extension_loaded('json')],
+            ['name' => 'cURL Extension', 'required' => true, 'pass' => extension_loaded('curl')],
+            ['name' => 'Fileinfo Extension', 'required' => true, 'pass' => extension_loaded('fileinfo')],
+            ['name' => 'XML Extension', 'required' => true, 'pass' => extension_loaded('xml')],
+            ['name' => 'Ctype Extension', 'required' => true, 'pass' => extension_loaded('ctype')],
+            ['name' => 'BCMath Extension', 'required' => true, 'pass' => extension_loaded('bcmath')],
+            ['name' => 'storage/ writable', 'required' => true, 'pass' => is_dir($storageDir) && is_writable($storageDir)],
+            ['name' => 'storage/framework/cache writable', 'required' => true, 'pass' => is_dir($cacheDir) && is_writable($cacheDir)],
+            ['name' => 'storage/framework/sessions writable', 'required' => true, 'pass' => is_dir($sessionsDir) && is_writable($sessionsDir)],
+            ['name' => 'storage/framework/views writable', 'required' => true, 'pass' => is_dir($viewsDir) && is_writable($viewsDir)],
+            ['name' => 'storage/logs writable', 'required' => true, 'pass' => is_dir($logsDir) && is_writable($logsDir)],
+            ['name' => 'bootstrap/cache/ writable', 'required' => true, 'pass' => is_dir($bootstrapCacheDir) && is_writable($bootstrapCacheDir)],
+            ['name' => '.env writable', 'required' => true, 'pass' => is_writable($envFile) || (! file_exists($envFile) && is_writable($envDir))],
+        ];
+
+        foreach ($checks as &$check) {
+            if (array_key_exists($check['name'], $overrides)) {
+                $check['pass'] = (bool) $overrides[$check['name']];
+            }
+        }
+
+        return $checks;
+    }
+
+    /**
+     * @param  array<string, bool>  $overrides
+     */
+    public function allRequirementsPassed(array $overrides = []): bool
+    {
+        foreach ($this->checkRequirements($overrides) as $check) {
+            if (($check['required'] ?? true) && ! $check['pass']) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Safely create the initial administrator within a database transaction and guard.
+     *
+     * @throws RuntimeException
+     */
+    public function createAdminUser(string $name, string $email, string $password): User
+    {
+        if (! $this->databaseIsMigrated()) {
+            throw new RuntimeException('Database migrations must be completed before creating an administrator.');
+        }
+
+        if ($this->hasAdminUser()) {
+            throw new RuntimeException('An administrator already exists.');
+        }
+
+        return DB::transaction(function () use ($name, $email, $password) {
+            if ($this->hasAdminUser()) {
+                throw new RuntimeException('An administrator already exists.');
+            }
+
+            DB::table('installation_guards')->insert([
+                'name' => 'primary_admin',
+                'created_at' => now(),
+            ]);
+
+            if (User::where('role', 'admin')->exists()) {
+                throw new RuntimeException('An administrator already exists.');
+            }
+
+            $admin = User::create([
+                'name' => $name,
+                'email' => $email,
+                'password' => Hash::make($password),
+                'role' => 'admin',
+                'is_active' => true,
+            ]);
+
+            DB::table('installation_guards')
+                ->where('name', 'primary_admin')
+                ->update(['user_id' => $admin->id]);
+
+            return $admin;
+        });
     }
 
     public function configureDatabase(array $data): void
@@ -141,6 +253,7 @@ class InstallationManager
             'APP_ENV' => 'production',
             'APP_KEY' => $appKey,
             'APP_DEBUG' => 'false',
+            'ALLOW_REGISTRATION' => 'false',
             'APP_URL' => $this->envValue($data['app_url']),
             'LOG_LEVEL' => 'error',
             'SESSION_SECURE_COOKIE' => str_starts_with(strtolower($data['app_url']), 'https://') ? 'true' : 'false',

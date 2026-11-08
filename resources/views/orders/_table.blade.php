@@ -31,7 +31,7 @@
                     <td class="td"><x-status :status="$order->status" /></td>
                     <td class="td font-mono text-xs text-slate-600">
                         @if ($order->status === 'review')
-                            {{ $order->customer_utr }}<div class="font-sans text-[11px] text-sky-600">submitted by customer</div>
+                            ••••••••{{ substr($order->customer_utr, -4) }}<div class="font-sans text-[11px] text-sky-600">submitted by customer</div>
                         @else
                             {{ $order->utr ?? '—' }}
                         @endif

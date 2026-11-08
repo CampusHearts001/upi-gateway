@@ -11,9 +11,19 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Validation\ValidationException;
 
 class PaymentAccount extends Model
 {
+    // These providers have server-to-server order status verifiers. Manual
+    // UTR accounts and the internal Sandbox simulator are deliberately absent.
+    public const STATUS_VERIFIABLE_PROVIDERS = ['paytm_business', 'paytm_pg', 'phonepe_pg'];
+
+    public function supportsStatusVerification(): bool
+    {
+        return in_array($this->provider, self::STATUS_VERIFIABLE_PROVIDERS, true);
+    }
+
     /**
      * Supported providers and the verifier that confirms payments for each.
      * To add a new provider, write a Verifier and register it here.
@@ -101,6 +111,42 @@ class PaymentAccount extends Model
     public function environment(): ?string
     {
         return $this->isHosted() ? ($this->credential('environment') === 'production' ? 'production' : 'sandbox') : null;
+    }
+
+    /** Application environment; unknown hosted configurations fail closed. */
+    public function paymentEnvironment(): ?string
+    {
+        return match ($this->provider) {
+            'paytm_pg', 'phonepe_pg' => match ($this->credential('environment')) {
+                'production' => Order::LIVE,
+                'sandbox' => Order::SANDBOX,
+                default => null,
+            },
+            'paytm_business', 'manual' => Order::LIVE,
+            default => null,
+        };
+    }
+
+    public function assertCompatibleWithOrder(Order $order): void
+    {
+        if ($order->payment_account_id !== $this->id || $order->user_id !== $this->user_id
+            || ! in_array($order->environment, [Order::LIVE, Order::SANDBOX], true)
+            || $this->paymentEnvironment() !== $order->environment) {
+            throw ValidationException::withMessages([
+                'payment_account_id' => 'The payment account does not match this order and its environment.',
+            ]);
+        }
+    }
+
+    public function assertLiveProviderOrder(Order $order, string $provider): void
+    {
+        $this->assertCompatibleWithOrder($order);
+
+        if ($order->environment !== Order::LIVE || $this->provider !== $provider) {
+            throw ValidationException::withMessages([
+                'payment_account_id' => 'Live provider verification requires a matching Live payment account.',
+            ]);
+        }
     }
 
     public function verifier(): Verifier

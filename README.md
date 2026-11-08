@@ -193,7 +193,7 @@ flowchart TD
 |---|---|
 | Backend Framework | Laravel 12 |
 | Programming Language | PHP 8.2+ |
-| Database | MySQL 8.x (mandatory) |
+| Database | MySQL driver with MySQL 8.x or MariaDB 10.x/11.x (mandatory in production) |
 | Frontend | Blade / JavaScript |
 | Queue Processing | Laravel Queue |
 | API Authentication | API Key & Secret |
@@ -223,7 +223,7 @@ Both supported deployment paths use the **same Installation Wizard**:
 ### Server Requirements
 
 - PHP 8.2 or newer.
-- MySQL database (mandatory; SQLite is not supported for application runtime).
+- MySQL database or supported MariaDB server through the MySQL driver (mandatory in production; SQLite is only for automated tests).
 - PDO and PDO MySQL.
 - Required Laravel PHP extensions, including cURL, OpenSSL, Mbstring, Tokenizer, XML, JSON, and Fileinfo.
 - Writable Laravel runtime directories with appropriately restricted permissions.
@@ -306,6 +306,7 @@ For command-line or development deployments, configure the following variables i
 | `APP_NAME` | Application name | UPI Gateway |
 | `APP_ENV` | Application environment | production |
 | `APP_DEBUG` | Debug mode | false |
+| `ALLOW_REGISTRATION` | Public merchant signup; disabled by default. | false |
 | `APP_URL` | Application URL | https://example.com |
 | `DB_CONNECTION` | Database driver | mysql |
 | `DB_HOST` | Database host | 127.0.0.1 |
@@ -316,11 +317,13 @@ For command-line or development deployments, configure the following variables i
 
 Never commit production credentials or API secrets to GitHub.
 
+Public `/register` GET and POST requests return 404 while `ALLOW_REGISTRATION=false`, and the login page hides its signup link. An administrator who intentionally wants public signup can set `ALLOW_REGISTRATION=true` in the server's private `.env` file. If configuration is cached, run `php artisan config:cache` afterward using the server's PHP CLI. Set it back to `false` and refresh the cache to close signup. Existing merchant login and administrator merchant controls remain available while signup is closed.
+
 ---
 
 ## 🗄️ MySQL Configuration
 
-MySQL is the required application database. SQLite is not supported by the installer or application runtime.
+MySQL is required for installation and production runtime. SQLite is used only by the automated test suite.
 
 Example MySQL environment configuration for deployments managed through the command line:
 
@@ -427,29 +430,30 @@ Webhook events:
 - `order.pending` (Sandbox)
 - `order.timeout` (Sandbox)
 
-Each webhook request includes an `X-Signature` header containing an HMAC-SHA256 signature of the raw request body.
+Each delivery includes `X-Signature: t=<unix-seconds>,v1=<hex-hmac>`, `X-Event-Id`, and `X-Event`. The HMAC-SHA256 input is the timestamp, a period, and the exact raw request body. Use the separate Live or Sandbox webhook signing secret shown in the dashboard for the corresponding environment. Reject timestamps outside a five-minute window. The current sender also supplies `X-Signature-Legacy` for older integrations; new integrations should verify `X-Signature`.
+
+Delivery is **at least once** and may arrive out of order. Store the signed body's `event_id` with a unique constraint and process each event only once. Use `event_sequence` to avoid applying an older order state after a newer one. A valid signature and recent timestamp alone do not prevent duplicate processing.
 
 ### PHP Verification Example
 
 ```php
 $body = file_get_contents('php://input');
 
-$secret = getenv('PAYMENT_WEBHOOK_SECRET');
-
-$expected = hash_hmac(
-    'sha256',
-    $body,
-    $secret
-);
-
-$received = $_SERVER['HTTP_X_SIGNATURE'] ?? '';
-
-if (!hash_equals($expected, $received)) {
+$secret = getenv('PAYMENT_WEBHOOK_SECRET'); // Select Live or Sandbox secret for this endpoint.
+$header = $_SERVER['HTTP_X_SIGNATURE'] ?? '';
+if (!preg_match('/^t=(\d+),v1=([a-f0-9]{64})$/', $header, $matches)
+    || abs(time() - (int) $matches[1]) > 300
+    || !is_string($secret)
+    || $secret === ''
+    || !hash_equals(hash_hmac('sha256', $matches[1].'.'.$body, $secret), $matches[2])) {
     http_response_code(401);
     exit;
 }
 
 $event = json_decode($body, true);
+$eventId = $event['event_id'] ?? null;
+// Insert $eventId into a table with a unique constraint before applying effects.
+// Treat a duplicate insert as an already processed delivery.
 
 switch ($event['event'] ?? '') {
     case 'order.paid':
@@ -490,6 +494,10 @@ Before accepting production traffic:
 Set `APP_ENV=production`, `APP_DEBUG=false`, a generated `APP_KEY`, an HTTPS `APP_URL`, secure session cookies, and separate Live/Sandbox webhook URLs. Do not include `.env`, database files, logs, sessions, or development archives in a release package. Take a database backup before running migrations.
 
 The expiry compatibility migration keeps `orders.expires_at` nullable for forward compatibility. Its rollback intentionally stops with an actionable error when NULL rows exist; it never guesses an expiry or alters payment history. Resolve those rows under an approved data policy, verify them, and then rerun the rollback.
+
+Expired Live orders with supported provider status verification have a configurable **24-hour late-payment recovery window after `expires_at`**. The `orders:check-pending` scheduler executes in independent, bounded dual phases: Phase 1 verifies due pending orders (bounded by `GATEWAY_PENDING_VERIFICATION_BATCH_SIZE`, default 100), and Phase 2 independently recovers due expired orders (bounded by `GATEWAY_LATE_PAYMENT_BATCH_SIZE`, default 100). Both phases use fair round-robin ordering (`last_checked_at ASC NULLS FIRST, id ASC`) and isolated error boundaries, ensuring a large pending backlog or query failures cannot starve late-payment recovery. Distributed command locking (`GATEWAY_SCHEDULER_LOCK_SECONDS=300`) prevents overlapping scheduler executions. Only validated provider success bound to the order's original expiry window can change expired orders to paid. Merchants must handle a signed `order.paid` event even after an earlier `order.expired` event. Manual UTR matching and Sandbox simulations cannot recover Live payments. Beyond the configured window there are no automatic checks; investigate with the bank/provider. See [configuration, provider limitations and recovery behavior](docs/INSTALLATION.md#payments-received-after-expiry).
+
+New order events are persisted transactionally in a [durable webhook outbox](docs/WEBHOOK-OUTBOX.md). The scheduler dispatches up to 100 due events per minute by default. Payloads are immutable and include `event_id`, `event_sequence`, and `occurred_at`; HMAC signing is unchanged. Delivery is at least once and can be out of order: consumers must deduplicate by the signed event ID and prevent older sequences from reverting newer state. Queue outages retain the intent for retry; queued does not mean delivered.
 
 For server configuration, queue worker, scheduler, permissions, and SSL instructions, follow the dedicated [cPanel](docs/CPANEL.md) or [Ubuntu VPS](docs/VPS.md) guide.
 

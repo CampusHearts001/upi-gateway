@@ -125,8 +125,28 @@ class SettingsController extends Controller
 
     public function regenerateKeys(Request $request)
     {
-        $request->user()->regenerateApiCredentials();
+        $credentials = $request->user()->regenerateApiCredentials();
 
-        return back()->with('status', 'New API keys generated. Update them in your website/app.');
+        return back()
+            ->with('status', 'New API credentials generated. Copy the secret now; it will not be shown again.')
+            ->with('live_api_secret_once_encrypted', Crypt::encryptString($credentials['secret']));
+    }
+
+    public function regenerateWebhookSecret(Request $request)
+    {
+        $secret = $request->user()->regenerateWebhookSecret();
+
+        return back()
+            ->with('status', 'New Live webhook signing secret generated. Copy it now; it will not be shown again.')
+            ->with('live_webhook_secret_once_encrypted', Crypt::encryptString($secret));
+    }
+
+    public function regenerateSandboxWebhookSecret(Request $request)
+    {
+        $secret = $request->user()->regenerateSandboxWebhookSecret();
+
+        return back()
+            ->with('status', 'New Sandbox webhook signing secret generated. Copy it now; it will not be shown again.')
+            ->with('sandbox_webhook_secret_once_encrypted', Crypt::encryptString($secret));
     }
 }

@@ -2,11 +2,33 @@
 
 namespace Tests;
 
+use App\Models\Order;
+use App\Services\OrderService;
+use App\Services\VerificationLease;
+use App\Services\Verifiers\VerificationResult;
 use App\Support\SafeUrl;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 
 abstract class TestCase extends BaseTestCase
 {
+    protected function verificationLease(Order $order): VerificationLease
+    {
+        $lease = app(OrderService::class)->acquireVerificationLease($order);
+        $this->assertNotNull($lease, 'Expected the test order to acquire a provider verification lease.');
+
+        return $lease;
+    }
+
+    protected function markProviderPaid(Order $order, VerificationResult $result): Order
+    {
+        return app(OrderService::class)->markPaid($order, $result, $this->verificationLease($order));
+    }
+
+    protected function expireOrder(Order $order): Order
+    {
+        return app(OrderService::class)->expire($order, $this->verificationLease($order));
+    }
+
     protected function setUp(): void
     {
         parent::setUp();

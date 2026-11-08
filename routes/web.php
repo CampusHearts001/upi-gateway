@@ -16,6 +16,19 @@ use App\Http\Middleware\RedirectIfInstalled;
 use Illuminate\Support\Facades\Route;
 
 // ── Installer ─────────────────────────────────────────────────────────────────
+Route::any('/install.php', function () {
+    http_response_code(200);
+    ob_start();
+    try {
+        require base_path('install.php');
+    } finally {
+        $content = (string) ob_get_clean();
+    }
+    $code = http_response_code() ?: 200;
+
+    return response($content, $code);
+})->name('install.php');
+
 Route::middleware(RedirectIfInstalled::class)->prefix('install')->name('install.')->group(function () {
     Route::get('/', [InstallController::class, 'index'])->name('index');
     Route::get('/database', [InstallController::class, 'database'])->name('database');
@@ -91,6 +104,8 @@ Route::middleware(['auth', 'active'])->group(function () {
     Route::post('/settings/rotation', [SettingsController::class, 'updateRotation'])->name('settings.rotation');
     Route::post('/settings/redirect-domains', [SettingsController::class, 'updateRedirectDomains'])->name('settings.redirect-domains');
     Route::post('/settings/regenerate-keys', [SettingsController::class, 'regenerateKeys'])->name('settings.regenerate');
+    Route::post('/settings/regenerate-webhook-secret', [SettingsController::class, 'regenerateWebhookSecret'])->name('settings.regenerate-webhook-secret');
+    Route::post('/settings/sandbox/regenerate-webhook-secret', [SettingsController::class, 'regenerateSandboxWebhookSecret'])->name('settings.sandbox.regenerate-webhook-secret');
 
     // Password change — uses Auth::logoutOtherDevices to sign out other sessions.
     Route::get('/settings/password', [ChangePasswordController::class, 'show'])->name('password.change.show');
@@ -102,6 +117,8 @@ Route::middleware(['auth', 'active'])->group(function () {
         Route::post('/merchants/{user}/toggle', [AdminController::class, 'toggleMerchant'])->name('merchants.toggle');
         Route::get('/orders', [AdminController::class, 'orders'])->name('orders');
         Route::get('/orders/{order}', [AdminController::class, 'showOrder'])->name('order.show');
+        Route::post('/orders/{order}/manual-payment-override', [AdminController::class, 'manualPaymentOverride'])
+            ->can('manual-payment-override')->name('orders.manual-payment-override');
         Route::get('/transaction-debugger', [TransactionDebuggerController::class, 'index'])->name('transactions.index');
         Route::get('/transaction-debugger/{order}', [TransactionDebuggerController::class, 'show'])->name('transactions.show');
     });

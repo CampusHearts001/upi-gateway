@@ -12,7 +12,9 @@
                 <a href="{{ route('dashboard') }}" class="btn btn-primary">Dashboard <x-icon name="arrow-right" class="w-4 h-4" /></a>
             @else
                 <a href="{{ route('login') }}" class="btn btn-ghost hidden sm:inline-flex">Log in</a>
-                <a href="{{ route('register') }}" class="btn btn-primary">Get started <x-icon name="arrow-right" class="w-4 h-4" /></a>
+                @if (config('auth.allow_registration', false))
+                    <a href="{{ route('register') }}" class="btn btn-primary">Get started <x-icon name="arrow-right" class="w-4 h-4" /></a>
+                @endif
             @endauth
         </div>
     </div>

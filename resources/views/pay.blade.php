@@ -100,6 +100,9 @@
                     <div class="flex-1 flex flex-col items-center justify-center text-center py-8">
                         <div class="grid place-items-center w-20 h-20 rounded-full bg-slate-100 text-slate-400"><x-icon name="clock" class="w-10 h-10" /></div>
                         <h1 class="mt-6 text-2xl font-bold tracking-tight text-slate-900">Payment link expired</h1>
+                        @if ($order->canRecoverLatePayment())
+                            <p class="mt-2 text-sm text-slate-500 max-w-sm">Already paid? Don't pay again. We can still check the provider until {{ $order->expires_at->copy()->addHours((int) config('gateway.late_payment_grace_hours', 24))->format('d M, h:i A') }}. This page updates when payment is confirmed.</p>
+                        @endif
                         @if ($order->acceptsCustomerUtr())
                             <p class="mt-2 text-sm text-slate-500 max-w-sm">If you already paid, don't pay again — submit your UTR below so {{ $merchant }} can confirm it.</p>
                             @include('pay._utr-form', ['class' => 'mt-8 w-full max-w-sm'])
@@ -225,11 +228,13 @@
 </div>
 @endsection
 
-@if (in_array($order->status, ['pending', 'review']))
+@if (in_array($order->status, ['pending', 'review']) || $order->canRecoverLatePayment())
 @push('scripts')
 <script nonce="{{ $csp_nonce }}">
 (() => {
     const initialStatus = @json($order->status);
+    const recoveryEndsAt = {{ $order->expires_at?->copy()->addHours((int) config('gateway.late_payment_grace_hours', 24))->getTimestampMs() ?? 0 }};
+    const pollDelay = initialStatus === 'expired' ? 30000 : 4000;
     const expiresAt = {{ ($order->expires_at ?? now()->addMinutes(config('gateway.order_expiry_minutes', 15)))->getTimestampMs() }};
     const total = {{ $totalSeconds }};
     const timer = document.getElementById('timer');
@@ -255,6 +260,7 @@
     setInterval(tick, 1000);
 
     const poll = async () => {
+        if (initialStatus === 'expired' && Date.now() > recoveryEndsAt) return;
         try {
             const res = await fetch(statusUrl, { headers: { Accept: 'application/json' } });
             if (res.ok) {
@@ -267,9 +273,9 @@
                 }
             }
         } catch (e) {}
-        setTimeout(poll, 4000);
+        setTimeout(poll, pollDelay);
     };
-    setTimeout(poll, 4000);
+    setTimeout(poll, pollDelay);
 })();
 </script>
 @endpush

@@ -10,6 +10,7 @@ class WebhookLog extends Model
     protected $fillable = [
         'order_id',
         'event',
+        'event_id',
         'url',
         'payload',
         'response_code',

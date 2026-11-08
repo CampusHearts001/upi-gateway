@@ -12,11 +12,13 @@
         <div class="absolute bottom-0 left-0 w-64 h-64 bg-sky-100/30 rounded-full blur-3xl -z-0 pointer-events-none"></div>
         <div class="relative mx-auto max-w-6xl px-4 sm:px-6 pt-16 pb-20 lg:pt-24 lg:pb-28 grid lg:grid-cols-2 gap-16 items-center">
             <div>
+                @if (config('auth.allow_registration', false))
                 <a href="{{ route('register') }}" class="inline-flex items-center gap-2 rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700 ring-1 ring-inset ring-brand-600/20 hover:bg-brand-100 transition-colors">
                     <span class="flex h-2 w-2 rounded-full bg-brand-500 animate-pulse"></span>
                     Now live · 0% transaction fee
                     <x-icon name="arrow-right" class="w-3 h-3" />
                 </a>
+                @endif
                 <h1 class="mt-6 text-4xl sm:text-5xl lg:text-[3.5rem] font-extrabold tracking-tight text-slate-900 leading-[1.08]">
                     Accept UPI payments
                     <span class="relative whitespace-nowrap">
@@ -27,7 +29,9 @@
                 </h1>
                 <p class="mt-6 text-lg text-slate-600 max-w-xl leading-relaxed">Dynamic QR for every order, automatic payment confirmation and signed webhooks. No settlement delays — money lands straight in your own UPI account.</p>
                 <div class="mt-10 flex flex-wrap gap-3">
+                    @if (config('auth.allow_registration', false))
                     <a href="{{ route('register') }}" class="btn btn-primary btn-lg shadow-lg shadow-brand-600/30 hover:shadow-xl hover:shadow-brand-600/40 transition-all">Start for free <x-icon name="arrow-right" class="w-5 h-5" /></a>
+                    @endif
                     <a href="{{ route('docs') }}" class="btn btn-secondary btn-lg"><x-icon name="code" class="w-5 h-5" /> View API docs</a>
                 </div>
                 <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-slate-500">
@@ -299,7 +303,9 @@
                             <li class="flex items-center gap-3"><x-icon name="check" class="w-5 h-5 text-emerald-500 shrink-0" /> {{ $f }}</li>
                         @endforeach
                     </ul>
+                    @if (config('auth.allow_registration', false))
                     <a href="{{ route('register') }}" class="btn btn-secondary w-full mt-8 py-3">Get started free</a>
+                    @endif
                 </div>
 
                 {{-- Pro --}}
@@ -325,7 +331,9 @@
                             <li class="flex items-center gap-3"><x-icon name="check" class="w-5 h-5 text-brand-600 shrink-0" /> {{ $f }}</li>
                         @endforeach
                     </ul>
+                    @if (config('auth.allow_registration', false))
                     <a href="{{ route('register') }}" class="btn btn-primary w-full mt-8 py-3">Start free trial</a>
+                    @endif
                 </div>
 
                 {{-- Business --}}
@@ -351,7 +359,9 @@
                             <li class="flex items-center gap-3"><x-icon name="check" class="w-5 h-5 text-emerald-500 shrink-0" /> {{ $f }}</li>
                         @endforeach
                     </ul>
+                    @if (config('auth.allow_registration', false))
                     <a href="{{ route('register') }}" class="btn btn-secondary w-full mt-8 py-3">Contact sales</a>
+                    @endif
                 </div>
 
             </div>
@@ -401,7 +411,9 @@
                 <h2 class="text-3xl sm:text-4xl font-bold tracking-tight text-white">Start accepting UPI payments today</h2>
                 <p class="mt-4 text-lg text-slate-300 max-w-xl mx-auto">Set up in minutes. No paperwork, no setup fee. Money goes directly to your bank account.</p>
                 <div class="mt-8 flex flex-wrap justify-center gap-3">
+                    @if (config('auth.allow_registration', false))
                     <a href="{{ route('register') }}" class="btn btn-lg bg-white text-slate-900 hover:bg-slate-100 shadow-xl">Create free account <x-icon name="arrow-right" class="w-5 h-5" /></a>
+                    @endif
                     <a href="{{ route('docs') }}" class="btn btn-lg bg-white/10 text-white hover:bg-white/20 ring-1 ring-white/20"><x-icon name="code" class="w-5 h-5" /> View API docs</a>
                 </div>
             </div>
@@ -412,7 +424,9 @@
     <div class="bg-brand-600 py-3.5">
         <div class="mx-auto max-w-6xl px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3">
             <p class="flex items-center gap-2 text-white text-sm font-medium"><x-icon name="bolt" class="w-4 h-4" /> Join hundreds of merchants already using {{ config('app.name') }}</p>
+            @if (config('auth.allow_registration', false))
             <a href="{{ route('register') }}" class="btn bg-white text-brand-700 hover:bg-brand-50 shrink-0 text-sm">Get started free <x-icon name="arrow-right" class="w-4 h-4" /></a>
+            @endif
         </div>
     </div>
 
@@ -422,7 +436,9 @@
                 <x-logo dark />
                 <p class="mt-4 text-sm leading-relaxed max-w-sm">{{ config('app.name') }} is a dynamic QR and payment verification service. Not a payment aggregator — payments go directly to your own UPI account.</p>
                 <div class="mt-6 flex gap-3">
+                    @if (config('auth.allow_registration', false))
                     <a href="{{ route('register') }}" class="btn btn-primary btn-sm">Get started</a>
+                    @endif
                     <a href="{{ route('docs') }}" class="btn bg-white/10 text-white hover:bg-white/20 btn-sm">API Docs</a>
                 </div>
             </div>
@@ -439,7 +455,9 @@
                 <div class="text-xs font-semibold uppercase tracking-widest text-slate-500 mb-4">Account</div>
                 <ul class="space-y-3 text-sm">
                     <li><a href="{{ route('login') }}" class="hover:text-white transition-colors">Log in</a></li>
+                    @if (config('auth.allow_registration', false))
                     <li><a href="{{ route('register') }}" class="hover:text-white transition-colors">Sign up free</a></li>
+                    @endif
                     <li><a href="{{ route('dashboard') }}" class="hover:text-white transition-colors">Dashboard</a></li>
                 </ul>
             </div>

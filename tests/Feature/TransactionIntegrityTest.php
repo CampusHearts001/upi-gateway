@@ -3,17 +3,20 @@
 namespace Tests\Feature;
 
 use App\Jobs\SendWebhook;
+use App\Models\AdminAuditLog;
 use App\Models\Order;
 use App\Models\User;
 use App\Services\OrderService;
 use App\Services\Verifiers\PaytmBusinessVerifier;
 use App\Services\Verifiers\PaytmPgVerifier;
 use App\Services\Verifiers\PhonePePgVerifier;
+use App\Services\Verifiers\VerificationResult;
+use App\Services\WebhookOutboxDispatcher;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
 /**
@@ -80,6 +83,21 @@ class TransactionIntegrityTest extends TestCase
         ));
     }
 
+    private function verified(Order $order, string $utr, string $txn): VerificationResult
+    {
+        return VerificationResult::fromPaytmBusiness($order, $order->amount, $utr, $txn);
+    }
+
+    private function assertValidationRejected(callable $action): void
+    {
+        try {
+            $action();
+            $this->fail('Expected validation to reject the operation.');
+        } catch (ValidationException $e) {
+            $this->assertNotEmpty($e->errors());
+        }
+    }
+
     // ── 1. Terminal state: PAID order cannot be re-paid ───────────────────────
 
     public function test_paid_order_cannot_be_marked_paid_again(): void
@@ -89,13 +107,54 @@ class TransactionIntegrityTest extends TestCase
         $order = $this->order($merchant);
 
         $service = app(OrderService::class);
-        $service->markPaid($order, '111111111111', 'TXN1', [], 'provider');
+        $lease = $this->verificationLease($order);
+        $service->markPaid($order, $this->verified($order, '111111111111', 'TXN1'), $lease);
         $this->assertSame(Order::PAID, $order->fresh()->status);
 
         // Second call must be a no-op (returns false internally, no second webhook).
-        $service->markPaid($order, '222222222222', 'TXN2', [], 'provider');
+        $service->markPaid($order, $this->verified($order, '222222222222', 'TXN2'), $lease);
         $this->assertSame('111111111111', $order->fresh()->utr);
+        app(WebhookOutboxDispatcher::class)->dispatchDue();
         Queue::assertPushed(SendWebhook::class, 1); // only one webhook
+    }
+
+    public function test_provider_evidence_is_bound_to_order_and_amount(): void
+    {
+        $merchant = $this->merchant();
+        $order = $this->order($merchant);
+        $other = $this->order($merchant);
+        $service = app(OrderService::class);
+
+        Queue::fake();
+        $lease = $this->verificationLease($order);
+        $this->assertValidationRejected(fn () => $service->markPaid($order, VerificationResult::fromPaytmBusiness(
+            $other, $other->amount, '412345678901', 'TXN-WRONG'
+        ), $lease));
+        $this->assertSame(Order::PENDING, $order->fresh()->status);
+        Queue::assertNothingPushed();
+    }
+
+    public function test_unsupported_provider_cannot_create_successful_evidence(): void
+    {
+        $merchant = $this->merchant();
+        $order = $this->order($merchant);
+
+        $this->expectException(\Error::class);
+        VerificationResult::fromTrustedProvider($order, 'manual', $order->amount, '412345678901', 'TXN-MANUAL');
+    }
+
+    public function test_provider_amount_mismatch_is_rejected_inside_lock(): void
+    {
+        $merchant = $this->merchant();
+        $order = $this->order($merchant);
+
+        Queue::fake();
+        $lease = $this->verificationLease($order);
+        $this->assertValidationRejected(fn () => app(OrderService::class)->markPaid($order, VerificationResult::fromPaytmBusiness(
+            $order, '99.00', '412345678901', 'TXN-AMOUNT'
+        ), $lease));
+        $this->assertSame(Order::PENDING, $order->fresh()->status);
+        Queue::assertNothingPushed();
     }
 
     public function test_database_rejects_duplicate_client_order_id_for_one_merchant(): void
@@ -107,23 +166,17 @@ class TransactionIntegrityTest extends TestCase
         $this->order($merchant, ['client_order_id' => 'same-id']);
     }
 
-    public function test_approval_rolls_back_with_its_surrounding_transaction(): void
+    public function test_direct_utr_approval_leaves_review_state_and_sends_no_paid_webhook(): void
     {
         Queue::fake();
         $merchant = $this->manualMerchant();
         $order = $this->order($merchant);
         app(OrderService::class)->submitCustomerUtr($order, '412345678901');
 
-        try {
-            DB::transaction(function () use ($order) {
-                app(OrderService::class)->approveCustomerUtr($order, '412345678901');
-                throw new \RuntimeException('rollback');
-            });
-        } catch (\RuntimeException $e) {
-            $this->assertSame('rollback', $e->getMessage());
-        }
+        $this->assertValidationRejected(fn () => app(OrderService::class)->approveCustomerUtr($order, '412345678901'));
 
         $this->assertSame(Order::REVIEW, $order->fresh()->status);
+        Queue::assertNotPushed(SendWebhook::class, fn ($job) => $job->event === 'order.paid');
     }
 
     // ── 2. Provider callback must not re-open a REVIEW order ─────────────────
@@ -133,6 +186,7 @@ class TransactionIntegrityTest extends TestCase
         Queue::fake();
         $merchant = $this->manualMerchant();
         $order = $this->order($merchant);
+        $lease = $this->verificationLease($order);
 
         // Customer submits UTR → order goes to REVIEW.
         $this->post(route('pay.utr', $order), ['utr' => '412345678901']);
@@ -140,7 +194,9 @@ class TransactionIntegrityTest extends TestCase
 
         // A provider-sourced markPaid (e.g. from a late Paytm callback) must be blocked.
         $service = app(OrderService::class);
-        $service->markPaid($order->fresh(), '412345678901', 'TXN1', [], 'provider');
+        $this->assertValidationRejected(fn () => $service->markPaid(
+            $order->fresh(), $this->verified($order->fresh(), '412345678901', 'TXN1'), $lease
+        ));
 
         // Order must remain in REVIEW, not jump to PAID via the provider path.
         $this->assertSame(Order::REVIEW, $order->fresh()->status);
@@ -164,7 +220,7 @@ class TransactionIntegrityTest extends TestCase
 
         // Now approve arrives late — must fail because status is no longer REVIEW.
         $this->actingAs($merchant)
-            ->post(route('orders.approve-utr', $order), ['bank_utr' => '412345678901'])
+            ->post(route('orders.approve-utr', $order), ['bank_utr' => '412345678901', 'received_amount' => 100.00])
             ->assertSessionHasErrors('bank_utr');
 
         $this->assertSame(Order::PENDING, $order->fresh()->status);
@@ -178,17 +234,14 @@ class TransactionIntegrityTest extends TestCase
 
         $this->post(route('pay.utr', $order), ['utr' => '412345678901']);
 
-        // Simulate: approve happens first.
+        // Matching UTR is rejected and cannot transition the order.
         $service = app(OrderService::class);
-        $service->approveCustomerUtr($order->fresh(), '412345678901');
-        $this->assertSame(Order::PAID, $order->fresh()->status);
-
-        // Reject arrives late — must fail because status is no longer REVIEW.
-        $this->actingAs($merchant)
-            ->post(route('orders.reject-utr', $order), ['reason' => 'late reject'])
-            ->assertSessionHasErrors('reason');
-
-        $this->assertSame(Order::PAID, $order->fresh()->status);
+        $this->assertValidationRejected(fn () => $service->approveCustomerUtr($order->fresh(), '412345678901'));
+        $this->assertSame(Order::REVIEW, $order->fresh()->status);
+        $this->actingAs($merchant)->post(route('orders.reject-utr', $order), ['reason' => 'Not received'])
+            ->assertSessionHasNoErrors();
+        $this->assertSame(Order::PENDING, $order->fresh()->status);
+        Queue::assertNotPushed(SendWebhook::class, fn ($job) => $job->event === 'order.paid');
     }
 
     // ── 4. Duplicate UTR submission is blocked atomically ────────────────────
@@ -244,6 +297,7 @@ class TransactionIntegrityTest extends TestCase
             'BANKTXNID' => '111111111111',
             'TXNID' => 'T1',
             'ORDERID' => $order->order_no,
+            'TXNDATE' => now()->format('Y-m-d H:i:s'),
         ])]);
 
         $result = app(PaytmBusinessVerifier::class)->check($order->load('paymentAccount'));
@@ -266,14 +320,14 @@ class TransactionIntegrityTest extends TestCase
             'credentials' => [
                 'mid' => 'PGMID',
                 'merchant_key' => 'abcd1234EFGH5678',
-                'website_name' => 'WEBSTAGING',
-                'environment' => 'sandbox',
+                'website_name' => 'DEFAULT',
+                'environment' => 'production',
             ],
             'is_default' => true,
         ]);
         $order = $this->order($merchant);
 
-        Http::fake(['securestage.paytmpayments.com/v3/order/status' => Http::response([
+        Http::fake(['secure.paytmpayments.com/v3/order/status' => Http::response([
             'body' => [
                 'resultInfo' => ['resultStatus' => 'TXN_SUCCESS'],
                 'txnId' => 'PTM1',
@@ -303,7 +357,7 @@ class TransactionIntegrityTest extends TestCase
                 'client_id' => 'CLIENT1',
                 'client_secret' => 'SECRET1',
                 'client_version' => '1',
-                'environment' => 'sandbox',
+                'environment' => 'production',
             ],
             'is_default' => true,
         ]);
@@ -355,11 +409,13 @@ class TransactionIntegrityTest extends TestCase
         $order = $this->order($merchant);
 
         $service = app(OrderService::class);
-        $service->expire($order);
+        $lease = $this->verificationLease($order);
+        $service->expire($order, $lease);
         $this->assertSame(Order::EXPIRED, $order->fresh()->status);
 
         // Second expire call must be a no-op.
-        $service->expire($order->fresh());
+        $service->expire($order->fresh(), $lease);
+        app(WebhookOutboxDispatcher::class)->dispatchDue();
         Queue::assertPushed(SendWebhook::class, 1); // only one expired webhook
     }
 
@@ -381,5 +437,55 @@ class TransactionIntegrityTest extends TestCase
             ->assertNotFound();
 
         $this->assertSame(Order::REVIEW, $order->fresh()->status);
+    }
+
+    public function test_admin_override_is_atomic_audited_and_cannot_repeat(): void
+    {
+        $merchant = $this->manualMerchant();
+        $admin = User::create(['name' => 'Admin', 'email' => 'override2@example.com', 'password' => 'password123', 'role' => 'admin']);
+        $order = $this->order($merchant);
+        $service = app(OrderService::class);
+
+        $service->adminOverridePaid($order, $admin, 'BANKREF123456', 'Independent bank statement reviewed by administrator.', '127.0.0.1', '100.00');
+
+        $this->assertSame(Order::PAID, $order->fresh()->status);
+        $this->assertSame('admin_override', $order->fresh()->verified_by);
+        $this->assertDatabaseHas('admin_audit_logs', [
+            'admin_id' => $admin->id,
+            'action' => 'order_manual_payment_override',
+            'subject_id' => $order->id,
+        ]);
+
+        $this->assertValidationRejected(fn () => $service->adminOverridePaid($order->fresh(), $admin, 'BANKREF999999', 'Second independent review attempt must be rejected.', '127.0.0.1', '100.00'));
+        $this->assertSame('BANKREF123456', $order->fresh()->utr);
+        $this->assertSame(1, AdminAuditLog::where('subject_id', $order->id)->count());
+    }
+
+    public function test_admin_override_rejects_locked_order_amount_mismatch(): void
+    {
+        $merchant = $this->manualMerchant();
+        $admin = User::create(['name' => 'Admin', 'email' => 'override3@example.com', 'password' => 'password123', 'role' => 'admin']);
+        $order = $this->order($merchant);
+
+        Queue::fake();
+        $this->assertValidationRejected(fn () => app(OrderService::class)->adminOverridePaid($order, $admin, 'BANKREF333333', 'Independent bank statement reviewed by administrator.', '127.0.0.1', '99.00'));
+        $this->assertSame(Order::PENDING, $order->fresh()->status);
+        $this->assertDatabaseMissing('admin_audit_logs', ['subject_id' => $order->id]);
+        Queue::assertNothingPushed();
+    }
+
+    public function test_admin_audit_record_survives_admin_deletion(): void
+    {
+        $merchant = $this->manualMerchant();
+        $admin = User::create(['name' => 'Admin', 'email' => 'override4@example.com', 'password' => 'password123', 'role' => 'admin']);
+        $order = $this->order($merchant);
+
+        app(OrderService::class)->adminOverridePaid($order, $admin, 'BANKREF444444', 'Independent bank statement reviewed by administrator.', '127.0.0.1', '100.00');
+        $auditId = AdminAuditLog::where('subject_id', $order->id)->value('id');
+        $admin->delete();
+
+        $this->assertDatabaseHas('admin_audit_logs', ['id' => $auditId, 'subject_id' => $order->id]);
+        $this->assertNull(AdminAuditLog::findOrFail($auditId)->admin_id);
+        $this->assertSame($admin->id, AdminAuditLog::findOrFail($auditId)->actor_admin_id);
     }
 }

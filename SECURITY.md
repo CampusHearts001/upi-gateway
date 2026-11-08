@@ -11,12 +11,17 @@ Only the latest commit on the `main` branch receives security fixes.
 
 ## Reporting a Vulnerability
 
+Public merchant registration is disabled by default (`ALLOW_REGISTRATION=false`). Only enable it intentionally after deciding who may create merchant accounts; keep the private `.env` file outside the public document root.
+
 **Please do not open a public GitHub issue for security vulnerabilities.**
 
-To report a vulnerability, please email the maintainer directly:
+To report a vulnerability:
+- Submit a confidential report via **GitHub Security Advisories** on this repository using the "Report a vulnerability" feature.
+- Alternatively, if GitHub private vulnerability reporting is unavailable, reach out to the project maintainers through verified private communication channels.
 
-- **Email:** security@example.com  *(replace with your actual address)*
-- **Subject:** `[SECURITY] Brief description`
+> [!IMPORTANT]
+> **Maintainer Notice for Deployments & Releases:**
+> Before deploying or publicly releasing this repository, maintainers must configure a dedicated, monitored security contact address or ensure GitHub Private Vulnerability Reporting is active.
 
 Include:
 1. Description of the vulnerability and the component affected.

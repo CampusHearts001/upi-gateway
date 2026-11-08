@@ -22,6 +22,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Public Registration
+    |--------------------------------------------------------------------------
+    |
+    | Public merchant self-registration is disabled by default. Set
+    | ALLOW_REGISTRATION=true only when intentionally opening signups.
+    |
+    */
+
+    'allow_registration' => (bool) env('ALLOW_REGISTRATION', false),
+
+    /*
+    |--------------------------------------------------------------------------
     | Authentication Guards
     |--------------------------------------------------------------------------
     |

@@ -2,17 +2,26 @@
 
 namespace App\Services;
 
-use App\Jobs\SendWebhook;
+use App\Models\AdminAuditLog;
 use App\Models\Order;
 use App\Models\PaymentAccount;
 use App\Models\User;
+use App\Services\Verifiers\VerificationResult;
+use Carbon\Carbon;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class OrderService
 {
+    public function __construct(
+        private readonly VerificationProcessInspector $processInspector,
+        private readonly VerificationNodeRegistry $nodeRegistry,
+    ) {}
+
     /**
      * @param  array{amount: numeric, client_order_id?: string, payment_account_id?: int, customer_name?: string, customer_email?: string, customer_mobile?: string, note?: string, redirect_url?: string}  $data
      */
@@ -32,6 +41,7 @@ class OrderService
             User::whereKey($merchant->id)->lockForUpdate()->firstOrFail();
 
             $account = $this->resolveAccount($merchant, (float) $data['amount'], $data['payment_account_id'] ?? null);
+            $account = PaymentAccount::whereKey($account->id)->lockForUpdate()->firstOrFail();
 
             return $this->createFor($merchant, $account, $data, Order::LIVE);
         });
@@ -39,6 +49,12 @@ class OrderService
 
     private function createSandbox(User $merchant, array $data): Order
     {
+        if (isset($data['payment_account_id'])) {
+            throw ValidationException::withMessages([
+                'payment_account_id' => 'Sandbox simulations do not use provider payment accounts.',
+            ]);
+        }
+
         return DB::transaction(function () use ($merchant, $data) {
             User::whereKey($merchant->id)->lockForUpdate()->firstOrFail();
 
@@ -49,6 +65,8 @@ class OrderService
     private function createFor(User $merchant, ?PaymentAccount $account, array $data, string $environment): Order
     {
         $orderNo = ($environment === Order::SANDBOX ? 'TST' : 'ORD').strtoupper(Str::random(16));
+
+        $expiresAt = now()->addMinutes((int) config('gateway.order_expiry_minutes', 15));
 
         $order = new Order([
             'order_no' => $orderNo,
@@ -61,10 +79,12 @@ class OrderService
             'customer_mobile' => $data['customer_mobile'] ?? null,
             'note' => $data['note'] ?? null,
             'redirect_url' => $data['redirect_url'] ?? null,
-            'expires_at' => now()->addMinutes(config('gateway.order_expiry_minutes')),
+            'expires_at' => $expiresAt,
+            'original_expires_at' => $expiresAt,
         ]);
         $order->forceFill(['environment' => $environment]);
         $order->user()->associate($merchant);
+        $account?->assertCompatibleWithOrder($order);
         $order->save();
 
         return $order;
@@ -76,6 +96,37 @@ class OrderService
      */
     public function check(Order $order, bool $force = false): Order
     {
+        // A short cache lease spans HTTP without holding SQL row locks.
+        $lock = Cache::lock('order-verification:'.$order->id, (int) config('gateway.verification_lease_seconds', 120));
+        if (! $lock->get()) {
+            return $order->refresh();
+        }
+
+        try {
+            // The database lease remains authoritative after the cache lock
+            // expires. Takeover requires confirmed termination of the exact
+            // same-node process identity; unknown liveness fails closed.
+            $lease = $this->acquireVerificationLease($order);
+            if (! $lease) {
+                return $order->refresh();
+            }
+
+            try {
+                return $this->checkWithoutOverlap($order, $force, $lease);
+            } finally {
+                $this->releaseVerificationLease($order, $lease);
+            }
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function checkWithoutOverlap(Order $order, bool $force, VerificationLease $lease): Order
+    {
+        $order->refresh();
+        if ($order->status === Order::EXPIRED) {
+            return $this->checkLatePayment($order, $lease);
+        }
         if (! $order->isPending()) {
             return $order;
         }
@@ -84,19 +135,33 @@ class OrderService
         // have a NULL expiry. Give them a fresh local expiry before any
         // provider verifier or scheduler code dereferences the timestamp.
         if ($order->expires_at === null) {
-            $order->forceFill([
-                'expires_at' => now()->addMinutes((int) config('gateway.order_expiry_minutes', 15)),
-            ])->save();
-
-            return $order->refresh();
+            return $this->repairNullExpiry($order, $lease);
         }
 
         if ($order->environment === Order::SANDBOX) {
-            return $order->isPastExpiry() ? $this->expire($order) : $order->refresh();
+            if ($order->payment_account_id !== null) {
+                $this->validateAccountForCheck($order);
+            }
+
+            return $order->isPastExpiry() ? $this->expire($order, $lease) : $order->refresh();
         }
 
-        // `force` skips the throttle, e.g. when the customer just returned from the PG.
+        $this->validateAccountForCheck($order);
+
+        // A scheduler outage must not allow an old PENDING row to bypass the
+        // recovery deadline. Expire it without making a provider request.
+        if ($order->isPastExpiry() && ! $order->isWithinLatePaymentGrace()) {
+            return $this->expire($order, $lease);
+        }
+
+        // Lock ownership & generation check before updating verification timestamps / throttles
         $claimed = Order::whereKey($order->id)
+            ->where('verification_token', $lease->token)
+            ->where('verification_generation', $lease->generation)
+            ->where('verification_node_id', $lease->nodeId)
+            ->where('verification_node_instance_id', $lease->nodeInstanceId)
+            ->where('verification_pid', $lease->pid)
+            ->where('verification_process_identity', $lease->processIdentity)
             ->where('status', Order::PENDING)
             ->when(! $force, fn ($q) => $q->where(fn ($q) => $q->whereNull('last_checked_at')
                 ->orWhere('last_checked_at', '<=', now()->subSeconds(config('gateway.check_interval_seconds')))))
@@ -107,43 +172,209 @@ class OrderService
         // intentionally bypasses the interval, so verify the state separately.
         if ($force && ! $claimed) {
             $claimed = Order::whereKey($order->id)
+                ->where('verification_token', $lease->token)
+                ->where('verification_generation', $lease->generation)
+                ->where('verification_node_id', $lease->nodeId)
+                ->where('verification_node_instance_id', $lease->nodeInstanceId)
+                ->where('verification_pid', $lease->pid)
+                ->where('verification_process_identity', $lease->processIdentity)
                 ->where('status', Order::PENDING)
                 ->exists();
         }
 
         if ($claimed) {
+            // Keep provider HTTP calls outside SQL row locks
             $result = $order->paymentAccount->verifier()->check($order);
 
             if ($result->paid) {
-                return $this->markPaid($order, $result->utr, $result->txnId, $result->raw, 'provider');
+                return $this->markPaid($order, $result, $lease);
             }
         }
 
         if ($order->isPastExpiry()) {
-            return $this->expire($order);
+            return $this->expire($order, $lease);
         }
 
         return $order->refresh();
     }
 
-    public function markPaid(Order $order, ?string $utr, ?string $txnId, array $raw, string $verifiedBy): Order
+    protected function repairNullExpiry(Order $order, VerificationLease $lease): Order
     {
+        $duration = (int) config('gateway.order_expiry_minutes', 15);
+        $repairedExpiry = now()->addMinutes($duration);
+
+        Order::whereKey($order->id)
+            ->where('status', Order::PENDING)
+            ->whereNull('expires_at')
+            ->where('verification_token', $lease->token)
+            ->where('verification_generation', $lease->generation)
+            ->where('verification_node_id', $lease->nodeId)
+            ->where('verification_node_instance_id', $lease->nodeInstanceId)
+            ->where('verification_pid', $lease->pid)
+            ->where('verification_process_identity', $lease->processIdentity)
+            ->update([
+                'expires_at' => $repairedExpiry,
+                'original_expires_at' => DB::raw('COALESCE(original_expires_at, '.DB::getPdo()->quote($repairedExpiry->toDateTimeString()).')'),
+            ]);
+
+        return $order->refresh();
+    }
+
+    private function checkLatePayment(Order $order, VerificationLease $lease): Order
+    {
+        if ($order->environment !== Order::LIVE || ! $order->isWithinLatePaymentGrace()) {
+            return $order;
+        }
+        $order->load('paymentAccount');
+        if ($order->paymentAccount && ! $order->paymentAccount->supportsStatusVerification()) {
+            return $order;
+        }
+
+        // Atomic throttle applies to polling, scheduler and forced callbacks.
+        // Lock ownership & generation check before updating verification timestamps / throttles
+        $claimed = Order::whereKey($order->id)->where('status', Order::EXPIRED)
+            ->where('verification_token', $lease->token)
+            ->where('verification_generation', $lease->generation)
+            ->where('verification_node_id', $lease->nodeId)
+            ->where('verification_node_instance_id', $lease->nodeInstanceId)
+            ->where('verification_pid', $lease->pid)
+            ->where('verification_process_identity', $lease->processIdentity)
+            ->where('environment', Order::LIVE)
+            ->where('expires_at', '<=', now())
+            ->where('expires_at', '>=', now()->subHours(max(0, (int) config('gateway.late_payment_grace_hours', 24))))
+            ->where(fn ($q) => $q->whereNull('last_checked_at')
+                ->orWhere('last_checked_at', '<=', now()->subSeconds(max(120, (int) config('gateway.late_payment_check_interval_seconds', 300)))))
+            ->update(['last_checked_at' => now()]);
+        if (! $claimed) {
+            return $order->refresh();
+        }
+
         try {
-            $updated = DB::transaction(function () use ($order, $utr, $txnId, $raw, $verifiedBy) {
+            $order->refresh();
+            $this->validateAccountForCheck($order);
+            if (! $order->canRecoverLatePayment()) {
+                return $order;
+            }
+            // Keep provider HTTP calls outside SQL row locks
+            $result = $order->paymentAccount->verifier()->check($order);
+            $order = $result->paid ? $this->markPaid($order, $result, $lease) : $order->refresh();
+            Log::info('Late payment status checked', $this->verificationLogContext($order) + [
+                'outcome' => $order->status === Order::PAID ? 'paid' : 'not_confirmed',
+            ]);
+
+            return $order;
+        } catch (ValidationException $e) {
+            Log::warning('Late payment verification rejected', $this->verificationLogContext($order) + [
+                'validation_fields' => array_keys($e->errors()),
+            ]);
+            throw $e;
+        }
+    }
+
+    public function verificationLogContext(Order $order): array
+    {
+        return [
+            'order_id' => $order->id,
+            'payment_account_id' => $order->payment_account_id,
+            'order_environment' => $order->environment,
+            'provider' => $order->paymentAccount?->provider,
+            'account_environment' => $order->paymentAccount?->paymentEnvironment(),
+            'expires_at' => $order->expires_at?->toIso8601String(),
+        ];
+    }
+
+    public function markPaid(Order $order, VerificationResult $verification, ?VerificationLease $lease = null): Order
+    {
+        if ($lease === null) {
+            throw ValidationException::withMessages(['order' => 'A current provider verification lease is required.']);
+        }
+        if (! $verification->paid) {
+            throw ValidationException::withMessages(['order' => 'Only a successful provider verification can mark an order paid.']);
+        }
+
+        $utr = $verification->utr;
+        $txnId = $verification->txnId;
+        $raw = $verification->raw;
+        $provider = $verification->provider;
+        $verifiedAmount = $verification->amount;
+
+        try {
+            DB::transaction(function () use ($order, $verification, $utr, $txnId, $raw, $provider, $verifiedAmount, $lease) {
                 User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
-                $locked = Order::whereKey($order->id)->lockForUpdate()->first();
+                $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+                $account = $this->lockCompatibleAccount($locked);
+
+                if (! $this->ownsVerificationLease($locked, $lease)) {
+                    $this->logStaleVerificationOwner($locked, $lease, 'payment commit');
+
+                    return false;
+                }
+
+                if (! in_array($provider, ['paytm_business', 'paytm_pg', 'phonepe_pg'], true)
+                    || $account->provider !== $provider
+                    || $verification->paymentAccountId !== $account->id
+                    || $verification->environment !== Order::LIVE
+                    || $verification->environment !== $account->paymentEnvironment()
+                    || $verification->orderId !== $locked->id
+                    || $verification->orderNumber !== $locked->order_no
+                    || $verification->currency !== 'INR'
+                    || $verification->verifiedAt === null
+                    || $verification->verifiedAt->isFuture()
+                    || (trim($utr ?? '') === '' && trim($txnId ?? '') === '')
+                    || $verifiedAmount !== (string) $locked->amount) {
+                    throw ValidationException::withMessages(['order' => 'Provider verification does not match this order.']);
+                }
+
+                $lockedOriginalDeadline = $locked->originalExpiryDeadline();
+                if ($lockedOriginalDeadline === null
+                    || $verification->originalExpiresAt === null
+                    || $verification->originalExpiresAt->timestamp !== $lockedOriginalDeadline->timestamp) {
+                    throw ValidationException::withMessages(['order' => 'Provider evidence is not bound to this order original expiry deadline.']);
+                }
+
+                $requireTimestamp = (bool) config('gateway.evidence_require_timestamp', true);
+                if ($requireTimestamp && $verification->occurredAt === null) {
+                    throw ValidationException::withMessages(['order' => 'Provider evidence is missing a valid transaction timestamp.']);
+                }
+
+                $skewSeconds = max(0, (int) config('gateway.evidence_clock_skew_seconds', 300));
+                if ($verification->occurredAt !== null && $verification->occurredAt->isAfter(now()->addSeconds($skewSeconds))) {
+                    throw ValidationException::withMessages(['order' => 'Provider transaction timestamp is in the future.']);
+                }
+
+                $maxAgeSeconds = max(60, (int) config('gateway.evidence_max_age_seconds', 86400));
+                if ($verification->occurredAt !== null && $verification->occurredAt->isBefore(now()->subSeconds($maxAgeSeconds))) {
+                    throw ValidationException::withMessages(['order' => 'Provider payment evidence exceeds maximum allowed age.']);
+                }
+
+                $windowStart = $locked->created_at ? $locked->created_at->subSeconds($skewSeconds) : now()->subSeconds($skewSeconds);
+                if ($verification->occurredAt !== null && $verification->occurredAt->isBefore($windowStart)) {
+                    throw ValidationException::withMessages(['order' => 'Provider payment was completed before the order was created.']);
+                }
+
+                $graceHours = max(0, (int) config('gateway.late_payment_grace_hours', 24));
+                $latePaymentDeadline = $lockedOriginalDeadline->addHours($graceHours)->addSeconds($skewSeconds);
+                if ($verification->occurredAt !== null && $verification->occurredAt->isAfter($latePaymentDeadline)) {
+                    throw ValidationException::withMessages(['order' => 'Provider payment evidence was completed after the late-payment grace period.']);
+                }
 
                 if ($locked->environment !== Order::LIVE) {
                     throw ValidationException::withMessages(['order' => 'Sandbox orders cannot be paid through live payment handlers.']);
                 }
 
-                // Late payments after expiry are accepted; paid and review
-                // orders cannot be changed through this path.
                 if ($locked->status === Order::PAID) {
                     return false;
                 }
 
-                if ($locked->status === Order::REVIEW) {
+                // Recheck the deadline under lock: it may have passed while
+                // waiting for HTTP or another payment transition. NULL/future
+                // expiry cannot authorize recovery of an EXPIRED order.
+                if (($locked->status === Order::EXPIRED || $locked->isPastExpiry())
+                    && ! $locked->isWithinLatePaymentGrace()) {
+                    throw ValidationException::withMessages(['order' => 'The automatic late-payment recovery period has ended.']);
+                }
+
+                if (! in_array($locked->status, [Order::PENDING, Order::EXPIRED], true)) {
                     return false;
                 }
 
@@ -151,15 +382,25 @@ class OrderService
                     $this->ensureUtrUnused($locked, $utr);
                 }
 
+                $paidAt = $verification->occurredAt ? Carbon::instance($verification->occurredAt) : now();
+
                 $locked->forceFill([
                     'status' => Order::PAID,
                     'utr' => $utr,
                     'provider_txn_id' => $txnId,
                     'provider_response' => $raw ?: null,
-                    'verified_by' => $verifiedBy,
-                    'paid_at' => now(),
+                    'verified_by' => 'provider',
+                    'paid_at' => $paidAt,
                     'review_note' => null,
+                    'verification_token' => null,
+                    'verification_expires_at' => null,
+                    'verification_pid' => null,
+                    'verification_node_id' => null,
+                    'verification_node_instance_id' => null,
+                    'verification_process_identity' => null,
                 ])->save();
+
+                app(WebhookOutboxService::class)->record($locked, 'order.paid');
 
                 return true;
             });
@@ -170,26 +411,201 @@ class OrderService
 
         $order->refresh();
 
-        if ($updated) {
-            SendWebhook::dispatch($order, 'order.paid')->afterCommit();
-        }
-
         return $order;
     }
 
-    public function expire(Order $order): Order
+    public function adminOverridePaid(Order $order, User $admin, string $reference, string $reason, string $ip, string $submittedAmount): Order
     {
-        $updated = Order::whereKey($order->id)
-            ->where('status', Order::PENDING)
-            ->update(['status' => Order::EXPIRED]);
+        DB::transaction(function () use ($order, $admin, $reference, $reason, $ip, $submittedAmount) {
+            User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
+            $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+            $this->lockCompatibleAccount($locked);
 
-        $order->refresh();
+            if ($locked->environment !== Order::LIVE) {
+                throw ValidationException::withMessages(['order' => 'Only Live orders can receive an administrator override.']);
+            }
+            if ($locked->status === Order::PAID) {
+                throw ValidationException::withMessages(['order' => 'Order is already paid.']);
+            }
+            if (number_format((float) $submittedAmount, 2, '.', '') !== number_format((float) $locked->amount, 2, '.', '')) {
+                throw ValidationException::withMessages(['amount' => 'The confirmed amount must match the order amount exactly.']);
+            }
 
-        if ($updated) {
-            SendWebhook::dispatch($order, 'order.expired')->afterCommit();
+            $this->ensureUtrUnused($locked, $reference);
+            $locked->forceFill([
+                'status' => Order::PAID,
+                'utr' => $reference,
+                'provider_txn_id' => $reference,
+                'verified_by' => 'admin_override',
+                'paid_at' => now(),
+                'review_note' => null,
+            ])->save();
+
+            AdminAuditLog::create([
+                'admin_id' => $admin->id,
+                'action' => 'order_manual_payment_override',
+                'subject_type' => 'order',
+                'subject_id' => $locked->id,
+                'meta' => [
+                    'order_no' => $locked->order_no,
+                    'merchant_id' => $locked->user_id,
+                    'amount' => (string) $locked->amount,
+                    'verification_reference' => $reference,
+                    'reason' => $reason,
+                ],
+                'ip' => $ip,
+            ]);
+
+            app(WebhookOutboxService::class)->record($locked, 'order.paid');
+        });
+
+        return $order->refresh();
+    }
+
+    public function expire(Order $order, ?VerificationLease $lease = null): Order
+    {
+        if ($lease === null) {
+            throw ValidationException::withMessages(['order' => 'A current provider verification lease is required.']);
         }
 
-        return $order;
+        DB::transaction(function () use ($order, $lease) {
+            $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+            if ($locked->status !== Order::PENDING) {
+                return;
+            }
+
+            if (! $this->ownsVerificationLease($locked, $lease)) {
+                $this->logStaleVerificationOwner($locked, $lease, 'expiry commit');
+
+                return;
+            }
+
+            $locked->forceFill([
+                'status' => Order::EXPIRED,
+                'verification_token' => null,
+                'verification_expires_at' => null,
+                'verification_pid' => null,
+                'verification_node_id' => null,
+                'verification_node_instance_id' => null,
+                'verification_process_identity' => null,
+            ])->save();
+            app(WebhookOutboxService::class)->record($locked, 'order.expired');
+        });
+
+        return $order->refresh();
+    }
+
+    public function acquireVerificationLease(Order $order): ?VerificationLease
+    {
+        $leaseSeconds = (int) config('gateway.verification_lease_seconds', 120);
+        $node = $this->nodeRegistry->registerCurrentNode();
+
+        return DB::transaction(function () use ($order, $leaseSeconds, $node) {
+            $locked = Order::whereKey($order->id)->lockForUpdate()->first();
+            if (! $locked) {
+                return null;
+            }
+
+            if ($locked->status !== Order::PENDING && $locked->status !== Order::EXPIRED) {
+                return null;
+            }
+
+            if ($locked->verification_token !== null) {
+                if ($locked->verification_expires_at && $locked->verification_expires_at->isFuture()) {
+                    return null;
+                }
+
+                $liveness = $this->processInspector->status(
+                    $locked->verification_node_id,
+                    $locked->verification_node_instance_id,
+                    $locked->verification_pid,
+                    $locked->verification_process_identity,
+                );
+                if ($liveness !== VerificationProcessInspector::DEAD) {
+                    Log::warning('Expired provider verification lease was not taken over', [
+                        'order_id' => $locked->id,
+                        'verification_generation' => $locked->verification_generation,
+                        'owner_node_id' => $locked->verification_node_id,
+                        'liveness' => $liveness,
+                    ]);
+
+                    return null;
+                }
+            }
+
+            $token = (string) Str::uuid();
+            $generation = ((int) $locked->verification_generation) + 1;
+            $pid = getmypid() ?: 0;
+            $nodeId = $node['node_id'];
+            $nodeInstanceId = $node['instance_id'];
+            $processIdentity = $this->processInspector->currentProcessIdentity()
+                ?? 'unknown:'.hash('sha256', $token);
+            if ($pid <= 0 || $nodeId === '') {
+                Log::error('Provider verification lease could not establish a process identity', [
+                    'order_id' => $locked->id,
+                ]);
+
+                return null;
+            }
+
+            $locked->forceFill([
+                'verification_token' => $token,
+                'verification_generation' => $generation,
+                'verification_started_at' => now(),
+                'verification_expires_at' => now()->addSeconds($leaseSeconds),
+                'verification_pid' => $pid,
+                'verification_node_id' => $nodeId,
+                'verification_node_instance_id' => $nodeInstanceId,
+                'verification_process_identity' => $processIdentity,
+            ])->save();
+
+            return new VerificationLease($locked->id, $token, $generation, $nodeId, $nodeInstanceId, $pid, $processIdentity);
+        });
+    }
+
+    public function releaseVerificationLease(Order $order, ?VerificationLease $lease): void
+    {
+        if ($lease === null) {
+            return;
+        }
+
+        Order::whereKey($order->id)
+            ->where('verification_token', $lease->token)
+            ->where('verification_generation', $lease->generation)
+            ->where('verification_node_id', $lease->nodeId)
+            ->where('verification_node_instance_id', $lease->nodeInstanceId)
+            ->where('verification_pid', $lease->pid)
+            ->where('verification_process_identity', $lease->processIdentity)
+            ->update([
+                'verification_token' => null,
+                'verification_expires_at' => null,
+                'verification_pid' => null,
+                'verification_node_id' => null,
+                'verification_node_instance_id' => null,
+                'verification_process_identity' => null,
+            ]);
+    }
+
+    private function ownsVerificationLease(Order $order, VerificationLease $lease): bool
+    {
+        return $order->id === $lease->orderId
+            && hash_equals((string) $order->verification_token, $lease->token)
+            && (int) $order->verification_generation === $lease->generation
+            && hash_equals((string) $order->verification_node_id, $lease->nodeId)
+            && hash_equals((string) $order->verification_node_instance_id, $lease->nodeInstanceId)
+            && (int) $order->verification_pid === $lease->pid
+            && hash_equals((string) $order->verification_process_identity, $lease->processIdentity);
+    }
+
+    private function logStaleVerificationOwner(Order $order, VerificationLease $lease, string $operation): void
+    {
+        Log::warning('Stale verification owner rejected during '.$operation, [
+            'order_id' => $order->id,
+            'current_generation' => $order->verification_generation,
+            'attempted_generation' => $lease->generation,
+            'current_node_id' => $order->verification_node_id,
+            'attempted_node_id' => $lease->nodeId,
+        ]);
     }
 
     /**
@@ -200,7 +616,7 @@ class OrderService
     {
         $utr = $this->normalizeUtr($utr);
 
-        $updated = DB::transaction(function () use ($order, $utr) {
+        DB::transaction(function () use ($order, $utr) {
             User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
             // Lock the row so concurrent submissions cannot both pass the
             // acceptsCustomerUtr / ensureUtrUnused checks simultaneously.
@@ -212,7 +628,7 @@ class OrderService
 
             $this->ensureUtrUnused($locked, $utr);
 
-            return Order::whereKey($locked->id)
+            $updated = Order::whereKey($locked->id)
                 ->whereIn('status', [Order::PENDING, Order::EXPIRED])
                 ->where('utr_attempts', '<', Order::MAX_UTR_ATTEMPTS)
                 ->update([
@@ -222,49 +638,56 @@ class OrderService
                     'utr_attempts' => DB::raw('utr_attempts + 1'),
                     'review_note' => null,
                 ]);
+            if ($updated) {
+                app(WebhookOutboxService::class)->record($locked->refresh(), 'order.under_review');
+            }
         });
 
-        $order->refresh();
-
-        if ($updated) {
-            SendWebhook::dispatch($order, 'order.under_review')->afterCommit();
-        }
-
-        return $order;
+        return $order->refresh();
     }
 
     /**
-     * Merchant confirms by typing the UTR they see in their bank/UPI app.
-     * It must match what the customer submitted.
+     * Merchant confirms by entering the UTR and exact amount verified in their bank/UPI account.
+     * Never treats matching customer-submitted UTR alone as proof of payment.
      */
-    public function approveCustomerUtr(Order $order, string $bankUtr): Order
+    public function approveCustomerUtr(Order $order, string $bankUtr, float $receivedAmount = 0.0): Order
     {
         $bankUtr = $this->normalizeUtr($bankUtr);
 
-        DB::transaction(function () use ($order, $bankUtr) {
+        DB::transaction(function () use ($order, $bankUtr, $receivedAmount) {
             User::whereKey($order->user_id)->lockForUpdate()->firstOrFail();
             // Lock the row to prevent a concurrent approve + reject race.
-            $locked = Order::whereKey($order->id)->lockForUpdate()->first();
+            $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
 
             if ($locked->status !== Order::REVIEW) {
                 throw ValidationException::withMessages(['bank_utr' => 'This order is not waiting for review.']);
+            }
+
+            if (number_format($receivedAmount, 2, '.', '') !== number_format((float) $locked->amount, 2, '.', '')) {
+                throw ValidationException::withMessages(['received_amount' => 'Received amount must match the order amount exactly.']);
             }
 
             if (! hash_equals((string) $locked->customer_utr, $bankUtr)) {
                 throw ValidationException::withMessages(['bank_utr' => "UTR doesn't match what the customer submitted. Check your bank/UPI app again, or reject."]);
             }
 
-            $this->ensureUtrUnused($locked, $locked->customer_utr);
+            $this->ensureUtrUnused($locked, $bankUtr);
 
             $locked->forceFill([
                 'status' => Order::PAID,
-                'utr' => $locked->customer_utr,
+                'utr' => $bankUtr,
                 'verified_by' => 'utr_review',
                 'paid_at' => now(),
                 'review_note' => null,
+                'verification_token' => null,
+                'verification_expires_at' => null,
+                'verification_pid' => null,
+                'verification_node_id' => null,
+                'verification_node_instance_id' => null,
+                'verification_process_identity' => null,
             ])->save();
 
-            SendWebhook::dispatch($locked, 'order.paid')->afterCommit();
+            app(WebhookOutboxService::class)->record($locked, 'order.paid');
         });
 
         return $order->refresh();
@@ -276,7 +699,7 @@ class OrderService
      */
     public function rejectCustomerUtr(Order $order, ?string $reason): Order
     {
-        $canRetry = DB::transaction(function () use ($order, $reason) {
+        DB::transaction(function () use ($order, $reason) {
             // Lock to prevent a concurrent approve + reject race.
             $locked = Order::whereKey($order->id)->lockForUpdate()->first();
 
@@ -292,16 +715,12 @@ class OrderService
                 'expires_at' => $canRetry ? now()->addMinutes(config('gateway.order_expiry_minutes')) : $locked->expires_at,
             ]);
 
-            return $canRetry;
+            if (! $canRetry) {
+                app(WebhookOutboxService::class)->record($locked->refresh(), 'order.expired');
+            }
         });
 
-        $order->refresh();
-
-        if (! $canRetry) {
-            SendWebhook::dispatch($order, 'order.expired')->afterCommit();
-        }
-
-        return $order;
+        return $order->refresh();
     }
 
     /**
@@ -316,7 +735,10 @@ class OrderService
             ->exists();
 
         if ($taken) {
-            throw ValidationException::withMessages(['utr' => 'This UTR is already used on another order.']);
+            throw ValidationException::withMessages([
+                'utr' => 'This UTR is already used on another order.',
+                'bank_utr' => 'This UTR is already used on another order.',
+            ]);
         }
     }
 
@@ -337,11 +759,15 @@ class OrderService
             ]);
         }
 
-        $event = DB::transaction(function () use ($order, $outcome) {
+        DB::transaction(function () use ($order, $outcome) {
             $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
 
             if ($locked->environment !== Order::SANDBOX) {
                 abort(404);
+            }
+
+            if ($locked->payment_account_id !== null) {
+                $this->lockCompatibleAccount($locked);
             }
 
             if (! $locked->isPending() || $locked->sandbox_simulated_at !== null) {
@@ -382,14 +808,10 @@ class OrderService
             }
 
             $locked->forceFill($values)->save();
-
-            return $event;
+            app(WebhookOutboxService::class)->record($locked, $event);
         });
 
-        $order->refresh();
-        SendWebhook::dispatch($order, $event)->afterCommit();
-
-        return $order;
+        return $order->refresh();
     }
 
     /**
@@ -408,13 +830,18 @@ class OrderService
         // (IDOR guard). Use the already-loaded active collection first; only fire
         // a second query when the ID is not in the active set (it may be inactive).
         if ($accountId) {
-            $belongsToMerchant = $accounts->contains('id', $accountId)
-                || $merchant->paymentAccounts()->whereKey($accountId)->exists();
+            $explicit = $merchant->paymentAccounts()->whereKey($accountId)->first();
 
-            if (! $belongsToMerchant) {
+            if (! $explicit) {
                 throw ValidationException::withMessages(['payment_account_id' => 'This UPI account does not exist.']);
             }
+
+            if ($explicit->paymentEnvironment() !== Order::LIVE) {
+                throw ValidationException::withMessages(['payment_account_id' => 'Live orders require a Live payment account.']);
+            }
         }
+
+        $accounts = $accounts->filter(fn (PaymentAccount $account) => $account->paymentEnvironment() === Order::LIVE);
 
         $requested = $accountId ? $accounts->firstWhere('id', $accountId) : null;
         if ($requested?->canAccept($amount)) {
@@ -422,7 +849,7 @@ class OrderService
         }
 
         if ($accounts->isEmpty()) {
-            throw ValidationException::withMessages(['payment_account_id' => 'Add an active UPI account in the dashboard before creating orders.']);
+            throw ValidationException::withMessages(['payment_account_id' => 'Add an active Live payment account before creating Live orders.']);
         }
 
         $available = $accounts->filter(fn (PaymentAccount $a) => $a->canAccept($amount));
@@ -434,5 +861,28 @@ class OrderService
         return $merchant->rotation_mode === 'random'
             ? $available->random()
             : $available->sortBy([['is_default', 'desc'], ['id', 'asc']])->first();
+    }
+
+    private function lockCompatibleAccount(Order $order): PaymentAccount
+    {
+        $account = $order->paymentAccount()->lockForUpdate()->first();
+        if (! $account) {
+            throw ValidationException::withMessages(['payment_account_id' => 'A matching payment account is required.']);
+        }
+        $account->assertCompatibleWithOrder($order);
+        $order->setRelation('paymentAccount', $account);
+
+        return $account;
+    }
+
+    private function validateAccountForCheck(Order $order): void
+    {
+        // Refresh cached relationships before choosing an endpoint. The final
+        // transition locks and validates again after the network request.
+        $order->load('paymentAccount');
+        if (! $order->paymentAccount) {
+            throw ValidationException::withMessages(['payment_account_id' => 'A matching payment account is required.']);
+        }
+        $order->paymentAccount->assertCompatibleWithOrder($order);
     }
 }
