@@ -17,4 +17,13 @@ CHANGELOG.md export-ignore
 "backup zip" export-ignore
 /dist/** export-ignore
 /dist export-ignore
+/releases/** export-ignore
+/releases export-ignore
 .DS_Store export-ignore
+/tests/** export-ignore
+/tests export-ignore
+phpunit.xml export-ignore
+.phpunit.result.cache export-ignore
+/.phpunit.cache export-ignore
+.editorconfig export-ignore
+/UPI-Gateway-Read-Only-Audit-Plan.md export-ignore
