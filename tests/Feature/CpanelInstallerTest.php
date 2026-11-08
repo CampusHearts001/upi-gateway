@@ -44,6 +44,8 @@ class CpanelInstallerTest extends TestCase
         $this->assertContains('storage/ writable', $names);
         $this->assertContains('bootstrap/cache/ writable', $names);
         $this->assertContains('.env writable', $names);
+        $this->assertContains('Session Support', $names);
+        $this->assertContains('Production Assets (Vite build)', $names);
 
         $this->assertTrue($installer->allRequirementsPassed());
     }
@@ -756,5 +758,186 @@ class CpanelInstallerTest extends TestCase
             @unlink($progressPath);
             @unlink($lockPath);
         }
+    }
+
+    // ── 14. Universal Hosting URL & Diagnostic Tests ────────────────────────
+
+    public function test_missing_production_assets_blocks_requirements_pass(): void
+    {
+        $installer = app(InstallationManager::class);
+        $this->assertFalse($installer->allRequirementsPassed([
+            'Production Assets (Vite build)' => false,
+        ]));
+    }
+
+    public function test_application_url_auto_detection(): void
+    {
+        $installer = app(InstallationManager::class);
+
+        // 1. Root domain with HTTPS
+        $url = $installer->detectApplicationUrl(null, [
+            'HTTP_HOST' => 'example.com',
+            'HTTPS' => 'on',
+            'REQUEST_URI' => '/install',
+        ]);
+        $this->assertSame('https://example.com', $url);
+
+        // 2. Subdomain with HTTPS
+        $url = $installer->detectApplicationUrl(null, [
+            'HTTP_HOST' => 'pay.example.com',
+            'HTTPS' => 'on',
+            'REQUEST_URI' => '/install/database',
+        ]);
+        $this->assertSame('https://pay.example.com', $url);
+
+        // 3. Subdirectory with HTTPS
+        $url = $installer->detectApplicationUrl(null, [
+            'HTTP_HOST' => 'example.com',
+            'HTTPS' => 'on',
+            'REQUEST_URI' => '/payment/install',
+        ]);
+        $this->assertSame('https://example.com/payment', $url);
+
+        // 4. Subdirectory via SCRIPT_NAME in public/
+        $url = $installer->detectApplicationUrl(null, [
+            'HTTP_HOST' => 'amtechinfo.online',
+            'HTTPS' => 'on',
+            'SCRIPT_NAME' => '/repotest/public/install.php',
+            'REQUEST_URI' => '/repotest/public/install.php',
+        ]);
+        $this->assertSame('https://amtechinfo.online/repotest', $url);
+
+        // 5. Subdirectory with standalone install.php and query string
+        $url = $installer->detectApplicationUrl(null, [
+            'HTTP_HOST' => 'amtechinfo.online',
+            'HTTPS' => 'on',
+            'SCRIPT_NAME' => '/repotest/install.php',
+            'REQUEST_URI' => '/repotest/install.php?step=database',
+        ]);
+        $this->assertSame('https://amtechinfo.online/repotest', $url);
+
+        // 6. Custom non-default port
+        $url = $installer->detectApplicationUrl(null, [
+            'HTTP_HOST' => 'localhost:8080',
+            'HTTPS' => 'off',
+            'REQUEST_URI' => '/install',
+        ]);
+        $this->assertSame('http://localhost:8080', $url);
+
+        // 7. Cloudflare edge HTTPS
+        $url = $installer->detectApplicationUrl(null, [
+            'HTTP_HOST' => 'amtechinfo.online',
+            'REMOTE_ADDR' => '173.245.48.1',
+            'HTTP_CF_VISITOR' => '{"scheme":"https"}',
+            'REQUEST_URI' => '/repotest/install',
+        ]);
+        $this->assertSame('https://amtechinfo.online/repotest', $url);
+    }
+
+    public function test_environment_diagnostics_detection(): void
+    {
+        $installer = app(InstallationManager::class);
+
+        // Nginx in a subdirectory without public docroot
+        $diag = $installer->detectEnvironmentDiagnostics(null, [
+            'SERVER_SOFTWARE' => 'nginx/1.24.0',
+            'HTTP_HOST' => 'amtechinfo.online',
+            'REQUEST_URI' => '/repotest/install',
+            'DOCUMENT_ROOT' => '/www/wwwroot/amtechinfo.online',
+            'HTTPS' => 'on',
+        ]);
+
+        $this->assertSame('nginx', $diag['server_type']);
+        $this->assertTrue($diag['is_subdirectory']);
+        $this->assertSame('/repotest', $diag['subdirectory_path']);
+        $this->assertTrue($diag['requires_nginx_rules']);
+        $this->assertStringContainsString('location /repotest', $diag['nginx_rule_snippet']);
+        $this->assertStringContainsString('/public/build/', $diag['nginx_rule_snippet']);
+
+        // Apache at domain root with public docroot
+        $diagApache = $installer->detectEnvironmentDiagnostics(null, [
+            'SERVER_SOFTWARE' => 'Apache/2.4.52 (Ubuntu)',
+            'HTTP_HOST' => 'pay.example.com',
+            'REQUEST_URI' => '/install',
+            'DOCUMENT_ROOT' => '/var/www/pay.example.com/public',
+            'HTTPS' => 'on',
+        ]);
+
+        $this->assertSame('apache', $diagApache['server_type']);
+        $this->assertFalse($diagApache['is_subdirectory']);
+        $this->assertFalse($diagApache['requires_nginx_rules']);
+    }
+
+    public function test_root_index_static_asset_fallback(): void
+    {
+        $tempDir = sys_get_temp_dir().'/root_index_test_'.bin2hex(random_bytes(6));
+        mkdir($tempDir.'/public/build/assets', 0755, true);
+        file_put_contents($tempDir.'/public/build/manifest.json', '{"test": true}');
+        file_put_contents($tempDir.'/public/build/assets/test.css', 'body { color: red; }');
+        file_put_contents($tempDir.'/.env', 'SECRET=hidden');
+        copy(base_path('index.php'), $tempDir.'/index.php');
+        file_put_contents($tempDir.'/public/index.php', "<?php echo 'LARAVEL_APP';\n");
+
+        $port = rand(18200, 19900);
+        $cmd = sprintf('php -S 127.0.0.1:%d -t %s %s/index.php', $port, escapeshellarg($tempDir), escapeshellarg($tempDir));
+        $descriptorSpec = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $process = proc_open($cmd, $descriptorSpec, $pipes);
+        usleep(250000); // 250ms startup delay
+
+        try {
+            // 1. Fetching valid CSS through root index.php returns HTTP 200 with text/css
+            $ch = curl_init("http://127.0.0.1:{$port}/build/assets/test.css");
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_HEADER, true);
+            $response = curl_exec($ch);
+            curl_close($ch);
+
+            $this->assertStringContainsString('HTTP/1.1 200 OK', $response);
+            $this->assertStringContainsString('content-type: text/css', strtolower($response));
+            $this->assertStringContainsString('body { color: red; }', $response);
+
+            // 2. Traversal attempt to read .env is blocked
+            $ch = curl_init("http://127.0.0.1:{$port}/build/../../.env");
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            $resEnv = curl_exec($ch);
+            curl_close($ch);
+            $this->assertStringNotContainsString('SECRET=hidden', (string) $resEnv);
+
+            // 3. Virtual route falls through to public/index.php
+            $ch = curl_init("http://127.0.0.1:{$port}/login");
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            $resLogin = curl_exec($ch);
+            curl_close($ch);
+            $this->assertStringContainsString('LARAVEL_APP', (string) $resLogin);
+        } finally {
+            if (is_resource($process)) {
+                proc_terminate($process);
+                proc_close($process);
+            }
+            @unlink($tempDir.'/public/build/assets/test.css');
+            @unlink($tempDir.'/public/build/manifest.json');
+            @unlink($tempDir.'/public/index.php');
+            @unlink($tempDir.'/.env');
+            @unlink($tempDir.'/index.php');
+            @rmdir($tempDir.'/public/build/assets');
+            @rmdir($tempDir.'/public/build');
+            @rmdir($tempDir.'/public');
+            @rmdir($tempDir);
+        }
+    }
+
+    public function test_root_htaccess_contains_updated_subdirectory_and_security_rules(): void
+    {
+        $content = file_get_contents(base_path('.htaccess'));
+
+        // Verifies directory security blocks internal sensitive folders
+        $this->assertStringContainsString('tests|scripts', $content);
+
+        // Verifies loop-free subdirectory rewrite condition
+        $this->assertStringContainsString('RewriteCond %{REQUEST_URI} !(^|/)public/ [NC]', $content);
     }
 }

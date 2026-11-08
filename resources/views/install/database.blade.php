@@ -15,7 +15,8 @@
 
     <div>
         <label class="label">App URL</label>
-        <input type="url" name="app_url" value="{{ old('app_url', 'http://localhost') }}" class="input" placeholder="https://yourdomain.com" required>
+        <input type="url" name="app_url" value="{{ old('app_url', $detectedAppUrl ?? 'http://localhost') }}" class="input" placeholder="https://yourdomain.com" required>
+        <div class="mt-1 text-xs text-slate-500">Auto-detected application URL. Ensure this includes HTTPS and any subdirectory path.</div>
     </div>
 
     <input type="hidden" name="db_connection" value="mysql">

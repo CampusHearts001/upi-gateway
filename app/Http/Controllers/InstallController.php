@@ -23,6 +23,7 @@ class InstallController extends Controller
         return view('install.index', [
             'requirements' => $this->installer->checkRequirements(),
             'allPassed' => $this->installer->allRequirementsPassed(),
+            'diagnostics' => $this->installer->detectEnvironmentDiagnostics($request),
         ]);
     }
 
@@ -32,7 +33,9 @@ class InstallController extends Controller
             return redirect()->route('install.index');
         }
 
-        return view('install.database');
+        return view('install.database', [
+            'detectedAppUrl' => $this->installer->detectApplicationUrl($request),
+        ]);
     }
 
     public function databaseSave(Request $request)
@@ -47,6 +50,8 @@ class InstallController extends Controller
             'app_url' => ['required', 'url:http,https', 'max:500'],
             'app_name' => ['required', 'string', 'max:100', 'not_regex:/[\r\n]/'],
         ]);
+
+        $data['app_url'] = rtrim(trim($data['app_url']), '/');
 
         if (! $this->installer->isAllowedDatabaseHost($data['db_host'])) {
             return back()

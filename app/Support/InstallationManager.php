@@ -86,6 +86,230 @@ class InstallationManager
         return (bool) config('installer.allow_remote_db', false);
     }
 
+    public function ipInRange(string $ip, string $range): bool
+    {
+        if ($ip === '' || $range === '') {
+            return false;
+        }
+
+        if (! str_contains($range, '/')) {
+            return $ip === $range;
+        }
+
+        [$subnet, $bits] = explode('/', $range, 2);
+        $bits = (int) $bits;
+
+        $ipBin = @inet_pton($ip);
+        $subnetBin = @inet_pton($subnet);
+
+        if ($ipBin === false || $subnetBin === false || strlen($ipBin) !== strlen($subnetBin)) {
+            return false;
+        }
+
+        $fullBytes = intdiv($bits, 8);
+        $remBits = $bits % 8;
+
+        if ($fullBytes > 0 && substr($ipBin, 0, $fullBytes) !== substr($subnetBin, 0, $fullBytes)) {
+            return false;
+        }
+
+        if ($remBits > 0) {
+            $mask = (0xFF << (8 - $remBits)) & 0xFF;
+            $ipByte = ord($ipBin[$fullBytes]);
+            $subnetByte = ord($subnetBin[$fullBytes]);
+            if (($ipByte & $mask) !== ($subnetByte & $mask)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public function isHttps(array $server = []): bool
+    {
+        $server = ! empty($server) ? $server : ($_SERVER ?? []);
+
+        // 1. Direct Web Server HTTPS indicators (trusted socket)
+        if (! empty($server['HTTPS']) && strtolower((string) $server['HTTPS']) !== 'off') {
+            return true;
+        }
+
+        if (isset($server['SERVER_PORT']) && (int) $server['SERVER_PORT'] === 443) {
+            return true;
+        }
+
+        // 2. Identify if connection comes from a trusted reverse proxy or Cloudflare
+        $remoteAddr = (string) ($server['REMOTE_ADDR'] ?? '');
+        if ($remoteAddr === '') {
+            return false;
+        }
+
+        $cloudflareCidrs = [
+            '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+            '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+            '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+            '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+            '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+            '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+        ];
+
+        $localProxyCidrs = ['127.0.0.1/8', '::1/128'];
+
+        $isCloudflareProxy = false;
+        foreach ($cloudflareCidrs as $cidr) {
+            if ($this->ipInRange($remoteAddr, $cidr)) {
+                $isCloudflareProxy = true;
+                break;
+            }
+        }
+
+        $isLocalProxy = false;
+        foreach ($localProxyCidrs as $cidr) {
+            if ($this->ipInRange($remoteAddr, $cidr)) {
+                $isLocalProxy = true;
+                break;
+            }
+        }
+
+        $isConfiguredProxy = false;
+        $trustedProxiesEnv = getenv('TRUSTED_PROXIES') ?: ($_ENV['TRUSTED_PROXIES'] ?? '');
+        if (is_string($trustedProxiesEnv) && trim($trustedProxiesEnv) !== '') {
+            foreach (array_map('trim', explode(',', $trustedProxiesEnv)) as $configured) {
+                if ($configured !== '' && $this->ipInRange($remoteAddr, $configured)) {
+                    $isConfiguredProxy = true;
+                    break;
+                }
+            }
+        }
+
+        $isTrustedProxy = $isCloudflareProxy || $isLocalProxy || $isConfiguredProxy;
+
+        if (! $isTrustedProxy) {
+            return false;
+        }
+
+        // 3. Cloudflare CF-Visitor scheme detection
+        if (! empty($server['HTTP_CF_VISITOR'])) {
+            $visitor = json_decode((string) $server['HTTP_CF_VISITOR'], true);
+            if (is_array($visitor) && isset($visitor['scheme']) && strtolower((string) $visitor['scheme']) === 'https') {
+                return true;
+            }
+        }
+
+        // 4. Standard X-Forwarded-Proto and X-Forwarded-Ssl from trusted proxies
+        if (! empty($server['HTTP_X_FORWARDED_PROTO']) && strtolower((string) $server['HTTP_X_FORWARDED_PROTO']) === 'https') {
+            return true;
+        }
+
+        if (! empty($server['HTTP_X_FORWARDED_SSL']) && strtolower((string) $server['HTTP_X_FORWARDED_SSL']) === 'on') {
+            return true;
+        }
+
+        return false;
+    }
+
+    public function detectApplicationUrl($request = null, array $server = []): string
+    {
+        $server = ! empty($server) ? $server : ($_SERVER ?? []);
+        $scheme = $this->isHttps($server) ? 'https' : 'http';
+
+        $rawHost = (string) ($server['HTTP_HOST'] ?? $server['SERVER_NAME'] ?? 'localhost');
+        $rawHost = trim($rawHost);
+
+        // Normalize host and port: remove :80 for http and :443 for https
+        if (str_contains($rawHost, ':')) {
+            [$hostname, $port] = explode(':', $rawHost, 2);
+            $port = (int) $port;
+            if (($scheme === 'http' && $port === 80) || ($scheme === 'https' && $port === 443)) {
+                $host = $hostname;
+            } else {
+                $host = $hostname.':'.$port;
+            }
+        } else {
+            $host = $rawHost;
+        }
+
+        // Extract subdirectory path
+        $scriptName = str_replace('\\', '/', (string) ($server['SCRIPT_NAME'] ?? ''));
+        $scriptDir = dirname($scriptName);
+        $scriptDir = preg_replace('~/public$~i', '', $scriptDir);
+
+        if ($scriptDir !== '/' && $scriptDir !== '.' && $scriptDir !== '' && ! empty($scriptDir)) {
+            $basePath = rtrim($scriptDir, '/');
+        } else {
+            $uri = (string) ($server['REQUEST_URI'] ?? '');
+            $path = parse_url($uri, PHP_URL_PATH) ?: '';
+            $basePath = preg_replace('~/(install(\.php)?|public(/install(\.php)?)?|index\.php).*$~i', '', $path);
+            $basePath = rtrim((string) $basePath, '/');
+        }
+
+        return $scheme.'://'.$host.($basePath === '' ? '' : $basePath);
+    }
+
+    public function detectEnvironmentDiagnostics($request = null, array $server = []): array
+    {
+        $server = ! empty($server) ? $server : ($_SERVER ?? []);
+        $rawSoftware = (string) ($server['SERVER_SOFTWARE'] ?? '');
+        $softwareLower = strtolower($rawSoftware);
+
+        if (str_contains($softwareLower, 'nginx')) {
+            $serverType = 'nginx';
+        } elseif (str_contains($softwareLower, 'litespeed') || str_contains($softwareLower, 'openlitespeed')) {
+            $serverType = 'litespeed';
+        } elseif (str_contains($softwareLower, 'apache')) {
+            $serverType = 'apache';
+        } elseif (str_contains($softwareLower, 'caddy')) {
+            $serverType = 'caddy';
+        } else {
+            $serverType = 'unknown';
+        }
+
+        $appUrl = $this->detectApplicationUrl($request, $server);
+        $urlParts = parse_url($appUrl);
+        $subPath = trim((string) ($urlParts['path'] ?? ''), '/');
+        $isSubdirectory = $subPath !== '';
+        $subPrefix = $isSubdirectory ? '/'.$subPath : '';
+
+        $documentRoot = str_replace('\\', '/', (string) ($server['DOCUMENT_ROOT'] ?? ''));
+        $docRootIsPublic = str_ends_with(rtrim($documentRoot, '/'), '/public');
+
+        $isHttps = $this->isHttps($server);
+        $requiresNginxNotice = ($serverType === 'nginx') && ($isSubdirectory || ! $docRootIsPublic);
+
+        $docRootDisplay = $documentRoot !== '' ? rtrim($documentRoot, '/') : '/www/wwwroot/domain';
+        $nginxSnippet = <<<NGINX
+# UPI Gateway — Nginx Subdirectory & Security Rules ({$subPrefix})
+location ~ ^{$subPrefix}/(\\.(env|git|ht)|app|bootstrap|config|database|resources|routes|storage|vendor|tests|scripts) {
+    deny all;
+    return 404;
+}
+location ~ ^{$subPrefix}/(artisan|composer\\.(json|lock)|package(-lock)?\\.(json|lock)|phpunit\\.xml) {
+    deny all;
+    return 404;
+}
+location ^~ {$subPrefix}/build/ {
+    alias {$docRootDisplay}{$subPrefix}/public/build/;
+    access_log off;
+    expires 30d;
+}
+location {$subPrefix} {
+    try_files \$uri {$subPrefix}/index.php?\$query_string;
+}
+NGINX;
+
+        return [
+            'server_software' => $rawSoftware !== '' ? $rawSoftware : 'Unknown',
+            'server_type' => $serverType,
+            'is_https' => $isHttps,
+            'is_subdirectory' => $isSubdirectory,
+            'subdirectory_path' => $subPrefix,
+            'detected_app_url' => $appUrl,
+            'document_root_is_public' => $docRootIsPublic,
+            'requires_nginx_rules' => $requiresNginxNotice,
+            'nginx_rule_snippet' => trim($nginxSnippet),
+        ];
+    }
+
     public function isRequestAuthorized($request = null): bool
     {
         if (is_object($request) && method_exists($request, 'session')) {
@@ -262,6 +486,8 @@ class InstallationManager
             ['name' => 'storage/logs writable', 'required' => true, 'pass' => is_dir($logsDir) && is_writable($logsDir)],
             ['name' => 'bootstrap/cache/ writable', 'required' => true, 'pass' => is_dir($bootstrapCacheDir) && is_writable($bootstrapCacheDir)],
             ['name' => '.env writable', 'required' => true, 'pass' => is_writable($envFile) || (! file_exists($envFile) && is_writable($envDir))],
+            ['name' => 'Session Support', 'required' => true, 'pass' => function_exists('session_status')],
+            ['name' => 'Production Assets (Vite build)', 'required' => true, 'pass' => is_file(public_path('build/manifest.json'))],
         ];
 
         foreach ($checks as &$check) {
@@ -375,6 +601,7 @@ class InstallationManager
 
     public function writeEnvironment(array $data): void
     {
+        $data['app_url'] = rtrim(trim($data['app_url']), '/');
         $path = $this->envPath();
         $template = base_path('.env.example');
         $env = is_file($path) ? file_get_contents($path) : file_get_contents($template);

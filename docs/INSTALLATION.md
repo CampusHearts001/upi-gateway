@@ -8,15 +8,30 @@ The wizard writes `ALLOW_REGISTRATION=false` to `.env`; public `/register` GET a
 
 The Installation Wizard is completely passwordless, secure, and beginner-friendly without requiring manual tokens, setup passwords, or HTTP Basic Authentication. On first access, the wizard inspects requirements and allows you to proceed directly to database setup. For security, database hosts must be local (`127.0.0.1` or `localhost`), ensuring external visitors cannot hijack uninstalled applications. An existing installation stays locked during a database outage; an incomplete first-time installation can safely resume.
 
-Verify PHP 8.2+ and PDO, PDO MySQL, OpenSSL, mbstring, tokenizer, JSON, cURL, fileinfo, and XML. Create an empty MySQL 8.x or MariaDB 10.x/11.x database and a user able to create and alter tables. The prepared package must contain `vendor/autoload.php` and `public/build/`. Pre-built production packages are available directly via **GitHub Code → Download ZIP** (`main.zip`), from [GitHub Releases (`latest-main`)](https://github.com/mynkdev-21/upi-gateway/releases/tag/latest-main), or as GitHub Actions artifacts (see [CPANEL.md](CPANEL.md#obtaining-the-production-package)).
+Verify PHP 8.2+ and required extensions: PDO, PDO MySQL, OpenSSL, mbstring, tokenizer, JSON, cURL, fileinfo, XML, and BCMath. Ensure PHP Session Support is enabled, and pre-compiled production assets (`public/build/manifest.json`) are present. Create an empty MySQL 8.x or MariaDB 10.x/11.x database and a user able to create and alter tables. The prepared package must contain `vendor/autoload.php` and `public/build/`. Pre-built production packages are available directly via **GitHub Code → Download ZIP** (`main.zip`), from [GitHub Releases (`latest-main`)](https://github.com/mynkdev-21/upi-gateway/releases/tag/latest-main), or as GitHub Actions artifacts (see [CPANEL.md](CPANEL.md#obtaining-the-production-package)).
 
-The web root must be Laravel's `public/` directory (mandatory on Nginx to prevent public access to `.env` and internal files). `storage/` and `bootstrap/cache/` must be writable by PHP, and the application must be able to create `.env`. Use HTTPS in production. SQLite is not supported at runtime.
+### Universal Deployment Topologies
+
+UPI Gateway natively supports three deployment patterns:
+
+1. **Main domain:** `https://example.com/` (Document Root set to `public/`).
+2. **Subdomain:** `https://pay.example.com/` (Document Root set to `public/`).
+3. **Subdirectory:** `https://example.com/payment/` or `https://amtechinfo.online/repotest/` (nested within an existing site).
+
+The installation wizard includes intelligent URL detection that accurately identifies:
+- The active scheme (`https://` via direct TLS, Cloudflare reverse proxy headers `HTTP_CF_VISITOR`, or trusted upstream proxies `X-Forwarded-Proto`).
+- The public host name and port.
+- Any subdirectory path prefix (e.g. `/repotest` or `/payment`).
+
+On Nginx servers hosting the application in a subdirectory, the wizard automatically performs **Environment Diagnostics** and displays a copy-ready configuration snippet to ensure clean route handling and strict file protection without infinite redirect loops.
+
+The web root must be Laravel's `public/` directory (or protected via server rewrite rules on subdirectory deployments to prevent public access to `.env` and internal files). `storage/` and `bootstrap/cache/` must be writable by PHP, and the application must be able to create `.env`. Use HTTPS in production. SQLite is not supported at runtime.
 
 ## Step-by-step wizard
 
-1. Open `https://yourdomain.com/install`.
-2. On **Server Requirements**, confirm green checks for PHP, PDO, PDO MySQL, OpenSSL, mbstring, tokenizer, JSON, cURL, writable `storage/`, and writable `.env` handling. Fix missing extensions or permissions and refresh.
-3. On **Database Setup**, enter App Name and HTTPS App URL. MySQL is the only database type. Enter host, port (`3306` unless your host says otherwise), full database name, full username, and password, then select **Test connection and continue**.
+1. Open `https://yourdomain.com/install` (or `https://yourdomain.com/subdirectory/install`).
+2. On **Server Requirements**, confirm green checks for PHP 8.2+, 9 required extensions, Session Support, Writable Paths, and Production Assets (`public/build/`). If running in a subdirectory on Nginx, review the diagnostic recommendations. Fix any missing extensions or permissions and refresh.
+3. On **Database Setup**, verify the prefilled App Name and auto-detected HTTPS App URL (including any subdirectory path). MySQL is the only database type. Enter host, port (`3306` unless your host says otherwise), full database name, full username, and password, then select **Test connection and continue**.
 4. After connection success, the wizard writes `.env` atomically, generates `APP_KEY` when needed, applies production-safe settings, and continues.
 5. On **Run Migrations**, start migration to create the required tables. Failures show a generic message; fix database permissions/settings and retry.
 6. On **Create Admin Account**, enter Full Name, Email Address, Password, and Confirm Password. The password must be at least 10 characters.
@@ -102,3 +117,28 @@ Recovery depends on the provider retaining a queryable status. Paytm Business us
 Late checks log order/account IDs, environments, provider, expiry, and a safe outcome or validation-field list. Provider payloads, credentials, UTRs, and secrets are not included. Invalid legacy account assignments are skipped so other orders can be processed; investigate those records rather than changing their environment or payment history silently.
 
 Provider checks also use database ownership fencing. Set a stable, unique, non-placeholder `GATEWAY_VERIFICATION_NODE_ID` on every production server or container that can run the application; never share the value between nodes. Production rejects missing or placeholder identities. Each installation creates a local runtime installation ID and registers it in MySQL, allowing duplicate active node names to fail closed. Do not copy `storage/framework/verification-node-installation-id` between servers. A time limit alone does not transfer ownership while the recorded process may still be making an HTTP request. Same-node crash recovery requires confirmed process death and matching process-start identity. Unknown or remote-node liveness fails closed. See the [cPanel recovery procedure](CPANEL.md#provider-verification-ownership-and-recovery) for the audited operator workflow; do not clear a lease until its recorded execution is conclusively stopped.
+
+## Security Incident Protocol & Credential Rotation
+
+If an installation was deployed with its root directory exposed directly to the web without proper document root configuration or server block rules (e.g. before configuring Nginx location blocks in a subdirectory), `.env` or application logs may have been readable by external visitors.
+
+Follow this rotation checklist immediately:
+
+1. **Rotate MySQL Credentials:**
+   - Change the database user password in your hosting control panel or MySQL console.
+   - Update `DB_PASSWORD` in `.env`.
+2. **Rotate Application Key (`APP_KEY`):**
+   - Keep the old key in `APP_PREVIOUS_KEYS` so existing encrypted payment account credentials can still be decrypted.
+   - Generate a new key and update `.env`:
+     ```env
+     APP_KEY=base64:NEW_KEY_HERE...
+     APP_PREVIOUS_KEYS=base64:OLD_KEY_HERE...
+     ```
+3. **Rotate Payment Gateway Credentials:**
+   - In each payment provider console (Paytm PG, PhonePe PG), regenerate Merchant Keys, Salt Keys, and API secrets.
+   - Update the respective payment accounts in the UPI Gateway dashboard.
+4. **Rotate Webhook Secrets & Admin Credentials:**
+   - Change your administrator password in the dashboard.
+   - Regenerate merchant API secrets and webhook signing secrets.
+5. **Audit Access Logs:**
+   - Review web server access logs (e.g. `/var/log/nginx/access.log` or aaPanel website logs) for any HTTP 200 GET requests targeting `.env`, `.git`, or `storage/logs/`.

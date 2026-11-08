@@ -21,6 +21,10 @@ The installer writes `ALLOW_REGISTRATION=false`. To intentionally allow public m
   - `xml` (XML parsing for providers)
   - `ctype` (character classification)
   - `bcmath` (precision decimal arithmetic)
+- **PHP Features**:
+  - `session` (PHP native session support enabled)
+- **Pre-compiled Assets**:
+  - `public/build/manifest.json` (bundled in all production releases and GitHub ZIP downloads)
 - **Writable Paths**:
   - `storage/` (including `app/`, `framework/cache/`, `framework/sessions/`, `framework/views/`, `logs/`)
   - `bootstrap/cache/`
@@ -78,6 +82,76 @@ If you have Git, PHP 8.2+, Composer, and Node.js installed on your machine:
 ```bash
 ./scripts/build-release.sh production HEAD releases
 ```
+
+### Control Panel Deployment Configurations
+
+#### 1. cPanel (Apache & LiteSpeed)
+
+- **Dedicated Domain or Subdomain:**
+  - Create or select the domain/subdomain in cPanel **Domains**.
+  - Set the **Document Root** directly to the `public/` directory (e.g. `/home/ACCOUNT/upi-gateway/public` or `/home/ACCOUNT/public_html/public`).
+  - Upload the production package ZIP, extract it into the project folder, and ensure `storage/` and `bootstrap/cache/` are writable (`775`).
+- **Subdirectory Deployment (e.g., `https://example.com/payment`):**
+  - Extract the application package directly into the desired subdirectory (e.g. `public_html/payment`).
+  - The application's root `.htaccess` handles routing automatically:
+    - Rewrites non-static requests to `public/index.php` without causing infinite rewrite loops (`RewriteCond %{REQUEST_URI} !(^|/)public/ [NC]`).
+    - Strictly forbids direct HTTP access to internal folders (`app`, `bootstrap`, `config`, `database`, `resources`, `routes`, `storage`, `vendor`, `tests`, `scripts`, `docs`) and `.env`.
+    - No manual Apache configuration edits are required.
+
+#### 2. aaPanel / Baota (Nginx)
+
+- **Dedicated Website:**
+  - In aaPanel **File Manager**, navigate to your website root (e.g. `/www/wwwroot/yourdomain.com`).
+  - Upload the package ZIP and click **Uncompress**. Move files out of `upi-gateway-main/` directly into the website root if needed.
+  - In aaPanel **Website** &rarr; Click your domain &rarr; **Site directory**:
+    - Set **Site directory** to `/www/wwwroot/yourdomain.com`.
+    - Set **Running directory** to `/public` and click **Save**. *(MANDATORY FOR SECURITY)*
+  - In **URL rewrite**, select `laravel5` and click **Save**.
+- **Subdirectory Under Existing Website (e.g., `/repotest/`):**
+  - If deploying UPI Gateway inside a subdirectory of an existing aaPanel website where the main domain's document root cannot be changed:
+  - In aaPanel **Website** &rarr; Click your domain &rarr; **Config**, add the following block inside the `server { ... }` configuration before any generic PHP handlers:
+    ```nginx
+    # ==============================================================================
+    # UPI Gateway Subdirectory Configuration (Replace /repotest/ with your folder)
+    # ==============================================================================
+
+    # 1. Deny sensitive internal application directories and files
+    location ~ ^/repotest/(\.(env|git|ht)|app|bootstrap|config|database|resources|routes|storage|vendor|tests|scripts)(/|$) {
+        return 403;
+    }
+    location ~ ^/repotest/(artisan|composer\.(json|lock)|package(-lock)?\.(json|lock)|phpunit\.xml) {
+        return 403;
+    }
+
+    # 2. Vite compiled production assets (alias to public/build)
+    location ^~ /repotest/build/ {
+        alias /www/wwwroot/yourdomain.com/repotest/public/build/;
+        access_log off;
+        expires 30d;
+    }
+
+    # 3. Main subdirectory route handler (omit ^~ so preceding regex deny rules take effect)
+    location /repotest/ {
+        # Route virtual paths directly to index.php (avoid $uri/ to prevent directory collisions)
+        try_files $uri /repotest/index.php?$query_string;
+    }
+    ```
+  - Test and reload Nginx configuration in aaPanel.
+
+#### 3. CyberPanel (OpenLiteSpeed)
+
+- **Native `.htaccess` Support:**
+  - OpenLiteSpeed processes `.htaccess` rules automatically for both dedicated domains and subdirectories.
+  - After extracting the package, navigate to CyberPanel &rarr; **Websites** &rarr; **Manage** &rarr; **vHost Conf** or restart OpenLiteSpeed via `systemctl restart lsws` to ensure rewrite rules are loaded into memory.
+  - For dedicated domains, set the Virtual Host's `docRoot` to `$VH_ROOT/public_html/public`.
+
+#### 4. Plesk & DirectAdmin
+
+- **Apache with Nginx Reverse Proxy:**
+  - Works out-of-the-box using the provided `.htaccess` file.
+  - Ensure Nginx proxy mode forwards virtual routes to Apache, or enable **Smart static files processing**.
+- **Nginx Standalone Mode:**
+  - Add the `try_files` rule and internal directory block rules to **Additional Nginx Directives** matching the aaPanel Nginx snippet above.
 
 ### Dedicated application directory (cPanel / aaPanel)
 1. **cPanel**:

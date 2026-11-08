@@ -9,13 +9,13 @@
 
     # 1. Strictly block public HTTP access to sensitive files and directories
     RewriteRule (^|/)\.(?!well-known) - [F,L,NC]
-    RewriteRule ^(app|bootstrap|config|database|resources|routes|storage|vendor)(\/|$) - [F,L,NC]
+    RewriteRule ^(app|bootstrap|config|database|resources|routes|storage|vendor|tests|scripts)(\/|$) - [F,L,NC]
     RewriteRule ^(artisan|composer\.(json|lock)|package(-lock)?\.(json|lock)|phpunit\.xml) - [F,L,NC]
 
     # 2. Allow direct access to install.php if requested
     RewriteRule ^install\.php$ install.php [L,NC]
 
     # 3. Transparently route all other web traffic to the public/ directory
-    RewriteCond %{REQUEST_URI} !^/public/ [NC]
+    RewriteCond %{REQUEST_URI} !(^|/)public/ [NC]
     RewriteRule ^(.*)$ public/$1 [L]
 </IfModule>

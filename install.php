@@ -319,7 +319,7 @@ if ($method === 'POST' && ! $error) {
         $dbUsername = trim($_POST['db_username'] ?? '');
         $dbPassword = (string) ($_POST['db_password'] ?? '');
         $appName = trim($_POST['app_name'] ?? 'UPI Gateway');
-        $appUrl = trim($_POST['app_url'] ?? '');
+        $appUrl = rtrim(trim($_POST['app_url'] ?? ''), '/');
 
         // Validation
         if ($dbHost === '' || preg_match('/[\r\n]/', $dbHost)) {
@@ -429,10 +429,8 @@ if ($method === 'POST' && ! $error) {
 // ── 6. Step Views ────────────────────────────────────────────────────────────
 $requirements = $installer->checkRequirements();
 $allPassed = $installer->allRequirementsPassed();
-$scheme = installer_is_https($_SERVER) ? 'https' : 'http';
-$host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-$subPath = preg_replace('/\/install(\.php)?.*$/i', '', $_SERVER['REQUEST_URI'] ?? '');
-$currentUrl = $scheme.'://'.$host.$subPath;
+$diagnostics = $installer->detectEnvironmentDiagnostics(null, $_SERVER);
+$currentUrl = $diagnostics['detected_app_url'];
 
 ?>
 <!DOCTYPE html>
@@ -468,6 +466,8 @@ $currentUrl = $scheme.'://'.$host.$subPath;
         input:focus { outline: none; border-color: #4f46e5; ring: 2px solid #c7d2fe; }
         .help-text { font-size: 0.75rem; color: #64748b; margin-top: 0.3rem; }
         .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.85rem; margin-bottom: 1.25rem; }
+        .alert-notice { background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.85rem; margin-bottom: 1.25rem; line-height: 1.4; }
+        .alert-notice pre { background: #0f172a; color: #34d399; font-family: monospace; font-size: 0.75rem; padding: 0.6rem 0.75rem; border-radius: 0.35rem; overflow-x: auto; margin: 0.5rem 0 0; }
         .btn { display: block; width: 100%; text-align: center; padding: 0.75rem 1.25rem; background: #4f46e5; color: white; border: none; border-radius: 0.5rem; font-size: 0.95rem; font-weight: 600; cursor: pointer; text-decoration: none; }
         .btn:hover { background: #4338ca; }
         .btn:disabled { background: #94a3b8; cursor: not-allowed; }
@@ -512,6 +512,13 @@ $currentUrl = $scheme.'://'.$host.$subPath;
         <?php if ($step === 'requirements') { ?>
             <h2>Server &amp; Extension Checks</h2>
             <p class="subtitle">Checking your cPanel environment for required PHP modules and writable paths.</p>
+            <?php if (! empty($diagnostics['requires_nginx_rules'])) { ?>
+                <div class="alert-notice">
+                    <strong>Nginx Subdirectory Configuration Notice:</strong><br>
+                    Detected web server <strong><?= htmlspecialchars($diagnostics['server_software'], ENT_QUOTES, 'UTF-8') ?></strong> in subdirectory <code><?= htmlspecialchars($diagnostics['subdirectory_path'], ENT_QUOTES, 'UTF-8') ?></code>. Nginx does not process <code>.htaccess</code>. To ensure clean routes and secure internal files, add the following URL rewrite rules in your control panel (aaPanel / cPanel Nginx / Plesk):
+                    <pre><?= htmlspecialchars($diagnostics['nginx_rule_snippet'], ENT_QUOTES, 'UTF-8') ?></pre>
+                </div>
+            <?php } ?>
             <ul class="req-list">
                 <?php foreach ($requirements as $r) { ?>
                     <li class="req-item">

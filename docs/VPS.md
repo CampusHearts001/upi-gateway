@@ -67,6 +67,33 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+### Subdirectory Deployment on Nginx (e.g. `/payment/`)
+
+If UPI Gateway is deployed in a subdirectory inside an existing website (for example, `/var/www/main-site/payment/`), add the following rules inside the parent `server { ... }` block:
+
+```nginx
+# 1. Deny sensitive internal application directories and files
+location ~ ^/payment/(\.(env|git|ht)|app|bootstrap|config|database|resources|routes|storage|vendor|tests|scripts)(/|$) {
+    return 403;
+}
+location ~ ^/payment/(artisan|composer\.(json|lock)|package(-lock)?\.(json|lock)|phpunit\.xml) {
+    return 403;
+}
+
+# 2. Vite compiled production assets (alias to public/build)
+location ^~ /payment/build/ {
+    alias /var/www/main-site/payment/public/build/;
+    access_log off;
+    expires 30d;
+}
+
+# 3. Subdirectory routing (omit ^~ so preceding regex deny rules take effect)
+location /payment/ {
+    # Crucial: omit $uri/ to prevent physical folder redirect collisions on routes like /payment/docs
+    try_files $uri /payment/index.php?$query_string;
+}
+```
+
 Issue a TLS certificate with the approved certificate tooling before production use. Set the document root to `public/`; never point Nginx at the project root.
 
 For a TLS-terminating reverse proxy, set `APP_URL=https://your-domain.example` and `TRUSTED_PROXIES` to the comma-separated IP addresses or CIDR ranges of proxies that connect directly to PHP (for example, `10.0.0.5`). Never use `*`. At the public edge, replace client-supplied `X-Forwarded-For` and `X-Forwarded-Proto` with the verified client address and scheme; pass those headers only through trusted internal proxies. Restrict origin access to those proxies. For Cloudflare, use its current published proxy IP ranges and keep them updated; do not trust `CF-Connecting-IP` or client-supplied forwarded headers directly. Production payment URLs use the canonical `APP_URL` host and HTTPS. Verify HSTS on a public HTTPS response after deployment.
@@ -122,3 +149,15 @@ If migrating an existing production VPS from `SESSION_ENCRYPT=false` to `SESSION
 3. Refresh the configuration cache: `php artisan config:cache`.
 4. Existing plaintext database sessions cannot be decrypted under encryption mode. Laravel catches decryption exceptions gracefully, discards the unencrypted payload without HTTP 500 errors, and redirects the user to log in again.
 5. All subsequent sessions are stored encrypted.
+
+## 8. Security Incident Protocol & Credential Rotation
+
+If a server configuration error previously allowed direct web access to `.env` or application logs:
+
+1. **Rotate MySQL Password:** Change user password in MySQL and update `DB_PASSWORD` in `.env`.
+2. **Rotate Application Key (`APP_KEY`):**
+   - Place old `APP_KEY` into `APP_PREVIOUS_KEYS`.
+   - Generate and set a new `APP_KEY`.
+3. **Rotate Provider Keys:** In the Paytm and PhonePe merchant dashboards, generate new API keys, MID/salt credentials, and webhook secrets; update them in the UPI Gateway dashboard.
+4. **Rotate Admin Passwords:** Change all administrator passwords.
+5. **Inspect Nginx Access Logs:** Check `/var/log/nginx/access.log` for access to `/.env`, `/.git`, or `/storage/logs/`.

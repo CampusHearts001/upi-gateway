@@ -5,6 +5,22 @@
 <h1 class="text-2xl font-bold text-slate-900">Server Requirements</h1>
 <p class="mt-1 text-sm text-slate-500">Make sure your server meets all requirements before proceeding.</p>
 
+@if (!empty($diagnostics['requires_nginx_rules']))
+<div class="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900 text-sm">
+    <div class="flex items-center gap-2 font-semibold text-amber-800">
+        <x-icon name="alert" class="w-5 h-5 text-amber-600 shrink-0" />
+        <span>Nginx Subdirectory Configuration Notice</span>
+    </div>
+    <p class="mt-1 text-xs text-amber-800 leading-relaxed">
+        Detected web server <strong>{{ $diagnostics['server_software'] }}</strong> in subdirectory <code>{{ $diagnostics['subdirectory_path'] }}</code>. Nginx does not process <code>.htaccess</code> rules. To ensure clean routes and secure internal files, add the following URL rewrite rules in your control panel (aaPanel / cPanel Nginx / Plesk):
+    </p>
+    <details class="mt-2 text-xs">
+        <summary class="font-medium cursor-pointer text-amber-900 hover:underline">View Nginx configuration rules</summary>
+        <pre class="mt-2 p-3 bg-slate-900 text-emerald-400 rounded-lg overflow-x-auto font-mono text-[11px] leading-snug">{{ $diagnostics['nginx_rule_snippet'] }}</pre>
+    </details>
+</div>
+@endif
+
 <div class="mt-6 space-y-2">
     @foreach ($requirements as $req)
         <div class="flex items-center justify-between rounded-lg px-4 py-3 {{ $req['pass'] ? 'bg-emerald-50 ring-1 ring-emerald-200' : 'bg-red-50 ring-1 ring-red-200' }}">
