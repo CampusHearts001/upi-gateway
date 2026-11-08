@@ -622,15 +622,7 @@ class CpanelInstallerTest extends TestCase
         file_put_contents($tempDir.'/repotest/vendor/autoload.php', "<?php // mock autoload\n");
         copy(base_path('public/index.php'), $tempDir.'/repotest/public/index.php');
 
-        $port = rand(18200, 19900);
-        $cmd = sprintf('php -S 127.0.0.1:%d -t %s', $port, escapeshellarg($tempDir));
-        $descriptorSpec = [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $process = proc_open($cmd, $descriptorSpec, $pipes);
-        usleep(250000); // 250ms startup delay
+        [$process, $port] = $this->startPhpServer($tempDir);
 
         try {
             $testCases = [
@@ -655,10 +647,7 @@ class CpanelInstallerTest extends TestCase
                 $this->assertStringContainsString('302 Found', $response);
             }
         } finally {
-            if (is_resource($process)) {
-                proc_terminate($process);
-                proc_close($process);
-            }
+            $this->stopPhpServer($process);
             @unlink($tempDir.'/repotest/public/index.php');
             @unlink($tempDir.'/repotest/vendor/autoload.php');
             @unlink($tempDir.'/repotest/app/Support/DeploymentUrl.php');
@@ -884,15 +873,7 @@ class CpanelInstallerTest extends TestCase
         copy(base_path('index.php'), $tempDir.'/index.php');
         file_put_contents($tempDir.'/public/index.php', "<?php echo 'LARAVEL_APP';\n");
 
-        $port = rand(18200, 19900);
-        $cmd = sprintf('php -S 127.0.0.1:%d -t %s %s/index.php', $port, escapeshellarg($tempDir), escapeshellarg($tempDir));
-        $descriptorSpec = [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $process = proc_open($cmd, $descriptorSpec, $pipes);
-        usleep(250000); // 250ms startup delay
+        [$process, $port] = $this->startPhpServer($tempDir, $tempDir.'/index.php');
 
         try {
             // 1. Fetching valid CSS through root index.php returns HTTP 200 with text/css
@@ -920,10 +901,7 @@ class CpanelInstallerTest extends TestCase
             curl_close($ch);
             $this->assertStringContainsString('LARAVEL_APP', (string) $resLogin);
         } finally {
-            if (is_resource($process)) {
-                proc_terminate($process);
-                proc_close($process);
-            }
+            $this->stopPhpServer($process);
             @unlink($tempDir.'/public/build/assets/test.css');
             @unlink($tempDir.'/public/build/manifest.json');
             @unlink($tempDir.'/public/index.php');
@@ -945,5 +923,53 @@ class CpanelInstallerTest extends TestCase
 
         // Verifies loop-free subdirectory rewrite condition
         $this->assertStringContainsString('RewriteCond %{REQUEST_URI} !(^|/)public/ [NC]', $content);
+    }
+
+    /**
+     * Start a temporary PHP built-in webserver on an ephemeral port.
+     *
+     * @return array{0: resource, 1: int}
+     */
+    private function startPhpServer(string $docRoot, ?string $routerScript = null): array
+    {
+        $sock = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $port = $sock ? (int) substr(strrchr((string) stream_socket_get_name($sock, false), ':'), 1) : rand(22000, 32000);
+        if ($sock) {
+            fclose($sock);
+        }
+
+        $cmd = $routerScript !== null
+            ? sprintf('exec php -S 127.0.0.1:%d -t %s %s', $port, escapeshellarg($docRoot), escapeshellarg($routerScript))
+            : sprintf('exec php -S 127.0.0.1:%d -t %s', $port, escapeshellarg($docRoot));
+
+        $descriptorSpec = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+
+        $process = proc_open($cmd, $descriptorSpec, $pipes);
+
+        for ($attempt = 0; $attempt < 30; $attempt++) {
+            $conn = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.05);
+            if (is_resource($conn)) {
+                fclose($conn);
+                break;
+            }
+            usleep(25000);
+        }
+
+        return [$process, $port];
+    }
+
+    /**
+     * Terminate the subprocess webserver immediately without leaving orphan processes.
+     */
+    private function stopPhpServer($process): void
+    {
+        if (is_resource($process)) {
+            proc_terminate($process, 9);
+            proc_close($process);
+        }
     }
 }
