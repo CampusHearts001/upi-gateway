@@ -33,6 +33,8 @@ abstract class TestCase extends BaseTestCase
     {
         parent::setUp();
 
+        $this->withoutVite();
+
         $installedPath = storage_path('framework/testing/installed');
         config(['installer.installed_path' => $installedPath]);
         if (! is_dir(dirname($installedPath))) {
