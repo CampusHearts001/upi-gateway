@@ -24,15 +24,13 @@
 ---
 
 > [!IMPORTANT]
-> **Development Notice — November 2026**
+> **Stable Release Candidate — November 2026**
 >
-> We are actively working on bug fixes, security improvements, payment verification reliability, webhook delivery guarantees, and production-readiness enhancements.
+> The stable-release candidate has been pushed to the `main` branch. It includes the browser-based installer, MySQL production support, payment verification integrations, timestamped webhook signatures, and cPanel/VPS deployment guides.
 >
-> The project is currently undergoing additional testing and independent review. Some issues are still being addressed.
+> **External verification is still pending:** installation on a real cPanel shared-hosting account, production hosting and cron behavior, real-device UPI testing with GPay, PhonePe, Paytm and BHIM, and confirmation of GitHub Private Vulnerability Reporting settings.
 >
-> **Production deployment is not recommended until all ongoing fixes and verification are complete.**
->
-> Further updates will be published as improvements are completed and verified.
+> Review the deployment guides and complete your own environment-specific testing before accepting live payments. Local automated tests and a disposable MySQL installation do not prove that every hosting provider or UPI app has been verified.
 
 ## 📖 Overview
 
@@ -49,7 +47,9 @@ Each merchant can configure their own UPI accounts, generate dynamic payment QR 
 - Automated payment verification integrations
 - Multiple UPI account rotation and daily limits
 - Separate Live and Sandbox environments
-- Secure HMAC-SHA256 webhook signatures
+- Timestamped HMAC-SHA256 webhook signatures with a five-minute validation window
+- Separate encrypted Live and Sandbox webhook signing secrets
+- Webhook event IDs and sequence numbers for merchant-side deduplication and ordering
 - Manual UTR verification and review flow
 - Merchant API authentication
 - Centralized administration dashboard
@@ -139,10 +139,11 @@ Each merchant can configure their own UPI accounts, generate dynamic payment QR 
 - Sandbox transactions do not represent real payments.
 
 ### 🔔 Webhook Notifications
-- HMAC-SHA256 request signatures.
-- `order.paid` and `order.expired` events.
-- Webhook delivery logs.
-- Retry handling.
+- Timestamped HMAC-SHA256 request signatures (`t=...,v1=...`) with a five-minute default tolerance.
+- Separate encrypted Live and Sandbox webhook signing secrets.
+- `order.paid` and `order.expired` events, plus supported review and Sandbox events.
+- Durable webhook outbox, delivery logs, and queue retry handling.
+- At-least-once delivery with event IDs and sequence numbers for merchant-side idempotency and ordering.
 
 ### 🛡️ Security & Administration
 - API key and secret authentication.
@@ -228,9 +229,17 @@ Both supported deployment paths use the **same Installation Wizard**:
 - Required Laravel PHP extensions, including cURL, OpenSSL, Mbstring, Tokenizer, XML, JSON, and Fileinfo.
 - Writable Laravel runtime directories with appropriately restricted permissions.
 - HTTPS for production deployments.
-- A prepared production package containing Composer dependencies and compiled frontend assets.
+- A prepared production package containing production Composer dependencies in `vendor/` and compiled frontend assets in `public/build/`. The cPanel production server does not need Composer, Node.js, or npm.
 
 Check the deployment-specific guide for the complete server preparation instructions. Hosting environments can differ, so verify PHP extensions and database access with your hosting provider.
+
+### Production Distribution Package
+
+A prepared cPanel release package must include the Laravel application source, production `vendor/` dependencies, compiled `public/build/` assets, installer entry points, required hidden server files, and deployment documentation.
+
+The production package must not contain `.env`, SQLite/database files, runtime logs, `node_modules/`, tests, or nested development archives. Build assets and install production Composer dependencies before creating the package; cPanel users should not need Composer, Node.js, or npm on the hosting server.
+
+Keep the Laravel application outside the public web root and configure the domain document root to point only to the application's `public/` directory. Follow the [cPanel guide](docs/CPANEL.md) for the supported directory layout.
 
 ### 1. Prepare Your Hosting
 
