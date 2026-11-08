@@ -268,16 +268,22 @@ jobs:
           # Synchronize main branch production distribution files if needed
           echo "Checking main branch distribution synchronization..."
           unzip -q -o "package-dist/upi-gateway-production.zip" -d . "vendor/*" "public/build/*" "bootstrap/cache/packages.php"
+          # Revert installed.php metadata differences caused by detached composer archive build
+          git checkout vendor/composer/installed.php 2>/dev/null || true
           git add vendor public/build bootstrap/cache/packages.php
           if ! git diff --cached --quiet; then
-            echo "Production dependencies or assets differ from main. Synchronizing main branch..."
-            git commit -m "chore: synchronize main branch production distribution [skip ci]"
-            git push origin main
-            TRIGGER_SHA=$(git rev-parse HEAD)
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            sed -i "s/__TRIGGER_SHA__/${TRIGGER_SHA}/g" release-notes.md
-            sed -i "s/__SHORT_SHA__/${SHORT_SHA}/g" release-notes.md
-            echo "Synchronized main branch commit: ${TRIGGER_SHA}"
+            echo "Production dependencies or assets differ from main. Attempting to synchronize main branch..."
+            git commit -m "chore: synchronize main branch production distribution [skip ci]" || true
+            if git push origin main; then
+              TRIGGER_SHA=$(git rev-parse HEAD)
+              SHORT_SHA=$(git rev-parse --short HEAD)
+              sed -i "s/__TRIGGER_SHA__/${TRIGGER_SHA}/g" release-notes.md
+              sed -i "s/__SHORT_SHA__/${SHORT_SHA}/g" release-notes.md
+              echo "Synchronized main branch commit: ${TRIGGER_SHA}"
+            else
+              echo "Note: Pushing synchronized production distribution to main branch skipped (branch protection or permissions). Proceeding with release publication..."
+              git reset --hard "${TRIGGER_SHA}"
+            fi
           else
             echo "Main branch production distribution is already synchronized."
           fi
