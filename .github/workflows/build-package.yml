@@ -1,0 +1,167 @@
+name: Build Production Package
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version identifier (default: main-<short-sha>)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build & Validate Production Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout triggering commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Setup PHP 8.2 & Composer
+        uses: shivammathur/setup-php@9e72090525849c5e82e596468b86eb55e9cc5401 # 2.32.0
+        with:
+          php-version: '8.2'
+          extensions: mbstring, pdo, pdo_mysql, curl, fileinfo, xml, ctype, bcmath
+          coverage: none
+          tools: composer:v2
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: 20
+
+      - name: Resolve package version and commit metadata
+        id: meta
+        env:
+          RAW_INPUT_VERSION: ${{ github.event.inputs.version }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA=$(git rev-parse --short "${TRIGGER_SHA}")
+          printf 'short_sha=%s\n' "${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          INPUT_VERSION="${RAW_INPUT_VERSION:-}"
+          # Strip leading and trailing whitespace
+          INPUT_VERSION="$(printf '%s' "${INPUT_VERSION}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+          if [ -n "${INPUT_VERSION}" ]; then
+            # Reject control characters or newlines to prevent header/output injection
+            if [[ "${INPUT_VERSION}" =~ [[:cntrl:]] ]] || [[ "${INPUT_VERSION}" == *$'\n'* ]] || [[ "${INPUT_VERSION}" == *$'\r'* ]]; then
+              echo "Error: Input version contains forbidden control characters or newlines." >&2
+              exit 1
+            fi
+
+            # Compatible validation with scripts/build-release.sh (alphanumeric start, safe chars, no path traversal)
+            if [[ ! "${INPUT_VERSION}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || [[ "${INPUT_VERSION}" == *".."* ]]; then
+              echo "Error: Invalid version format '${INPUT_VERSION}'. Version must start with an alphanumeric character, contain only [a-zA-Z0-9._-], max 64 characters, and forbid path traversal (..)." >&2
+              exit 1
+            fi
+
+            PKG_VERSION="${INPUT_VERSION}"
+          else
+            PKG_VERSION="main-${SHORT_SHA}"
+          fi
+
+          printf 'pkg_version=%s\n' "${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Package version resolved: ${PKG_VERSION} (commit ${SHORT_SHA})"
+
+      - name: Build production package via release script
+        env:
+          PKG_VERSION: ${{ steps.meta.outputs.pkg_version }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          chmod +x ./scripts/build-release.sh
+          ./scripts/build-release.sh \
+            "${PKG_VERSION}" \
+            "${TRIGGER_SHA}" \
+            "build-output"
+
+      - name: Validate package integrity and extraction
+        env:
+          PKG_VERSION: ${{ steps.meta.outputs.pkg_version }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        run: |
+          PKG_NAME="upi-gateway-${PKG_VERSION}"
+          ZIP_FILE="build-output/${PKG_NAME}.zip"
+          SHA_FILE="build-output/${PKG_NAME}.zip.sha256"
+
+          echo "Validating archive existence..."
+          test -f "${ZIP_FILE}" || { echo "Archive file missing: ${ZIP_FILE}"; exit 1; }
+          test -f "${SHA_FILE}" || { echo "Checksum file missing: ${SHA_FILE}"; exit 1; }
+
+          echo "Verifying SHA-256 checksum..."
+          cd build-output
+          sha256sum -c "${PKG_NAME}.zip.sha256"
+          cd ..
+
+          echo "Extracting archive into isolated sandbox..."
+          SANDBOX_DIR=$(mktemp -d)
+          unzip -q "${ZIP_FILE}" -d "${SANDBOX_DIR}"
+
+          echo "Verifying required production files..."
+          test -f "${SANDBOX_DIR}/vendor/autoload.php" || { echo "Missing vendor/autoload.php"; exit 1; }
+          test -f "${SANDBOX_DIR}/public/build/manifest.json" || { echo "Missing public/build/manifest.json"; exit 1; }
+          test -f "${SANDBOX_DIR}/artisan" || { echo "Missing artisan"; exit 1; }
+          test -f "${SANDBOX_DIR}/bootstrap/app.php" || { echo "Missing bootstrap/app.php"; exit 1; }
+          test -f "${SANDBOX_DIR}/bootstrap/cache/packages.php" || { echo "Missing bootstrap/cache/packages.php"; exit 1; }
+          test -f "${SANDBOX_DIR}/install.php" || { echo "Missing install.php"; exit 1; }
+          test -f "${SANDBOX_DIR}/public/install.php" || { echo "Missing public/install.php"; exit 1; }
+          test -f "${SANDBOX_DIR}/.htaccess" || { echo "Missing root .htaccess"; exit 1; }
+          test -f "${SANDBOX_DIR}/public/.htaccess" || { echo "Missing public/.htaccess"; exit 1; }
+          test -f "${SANDBOX_DIR}/docs/CPANEL.md" || { echo "Missing docs/CPANEL.md"; exit 1; }
+          test -f "${SANDBOX_DIR}/docs/INSTALLATION.md" || { echo "Missing docs/INSTALLATION.md"; exit 1; }
+          test -f "${SANDBOX_DIR}/.env.example" || { echo "Missing .env.example"; exit 1; }
+
+          echo "Verifying exclusion of forbidden files..."
+          test ! -f "${SANDBOX_DIR}/.env" || { echo "Forbidden .env present"; exit 1; }
+          test ! -d "${SANDBOX_DIR}/tests" || { echo "Forbidden tests/ present"; exit 1; }
+          test ! -d "${SANDBOX_DIR}/.git" || { echo "Forbidden .git present"; exit 1; }
+          test ! -d "${SANDBOX_DIR}/node_modules" || { echo "Forbidden node_modules present"; exit 1; }
+          test ! -f "${SANDBOX_DIR}/storage/installed" || { echo "Forbidden storage/installed present"; exit 1; }
+          test -z "$(find "${SANDBOX_DIR}/storage" -name "installer-*")" || { echo "Forbidden installer tokens present"; exit 1; }
+          test -z "$(find "${SANDBOX_DIR}" -name "*.sqlite*")" || { echo "Forbidden SQLite database present"; exit 1; }
+
+          echo "Testing Laravel runtime boot and syntax..."
+          php -l "${SANDBOX_DIR}/public/install.php"
+          php "${SANDBOX_DIR}/artisan" --version
+          php "${SANDBOX_DIR}/artisan" about --only=environment
+
+          # Record summary for GitHub Actions
+          PKG_SIZE=$(du -h "${ZIP_FILE}" | cut -f1)
+          SHA_VAL=$(cat "${SHA_FILE}")
+          TOTAL_FILES=$(unzip -l "${ZIP_FILE}" | tail -1 | awk '{print $2}')
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            echo "### 📦 Production Package Build Summary" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Package File** | \`${PKG_NAME}.zip\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Size** | \`${PKG_SIZE}\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Member Count** | ${TOTAL_FILES} files |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Target Commit** | \`${SHORT_SHA}\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **SHA-256** | \`${SHA_VAL}\` |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          rm -rf "${SANDBOX_DIR}"
+          echo "Validation completed successfully."
+
+      - name: Upload production package artifact
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: upi-gateway-main-${{ steps.meta.outputs.short_sha }}
+          path: |
+            build-output/*.zip
+            build-output/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

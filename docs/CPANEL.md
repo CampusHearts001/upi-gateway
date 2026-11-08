@@ -41,6 +41,31 @@ If the host terminates HTTPS at a reverse proxy, ask for the IP address or CIDR 
 
 ## Step 2 — Upload application
 
+### Obtaining the production package
+
+#### Option A: Download automated build from GitHub Actions (Recommended)
+Every push to the `main` branch automatically generates a clean, verified, ready-to-install production package with all production dependencies in `vendor/` and compiled frontend assets in `public/build/`:
+
+1. Open the repository on GitHub and navigate to the **Actions** tab, or open [Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml).
+2. Select the latest completed run on the `main` branch.
+3. Scroll down to the **Artifacts** section at the bottom of the run summary page.
+4. Click `upi-gateway-main-<commit>` to download the artifact bundle.
+5. Extract the downloaded archive on your computer to reveal:
+   - `upi-gateway-main-<commit>.zip` — the installation archive ready to upload to cPanel.
+   - `upi-gateway-main-<commit>.zip.sha256` — the SHA-256 integrity checksum.
+6. Verify package integrity:
+   ```bash
+   sha256sum -c upi-gateway-main-<commit>.zip.sha256
+   # Or on macOS:
+   shasum -a 256 -c upi-gateway-main-<commit>.zip.sha256
+   ```
+
+#### Option B: Build locally from source
+If you have Git, PHP 8.2+, Composer, and Node.js installed on your machine:
+```bash
+./scripts/build-release.sh main-$(git rev-parse --short HEAD) HEAD releases
+```
+
 ### Dedicated application directory
 1. In cPanel **File Manager**, create a directory outside `public_html`, e.g., `/home/ACCOUNT/upi-gateway`.
 2. Upload the production ZIP package and extract it there.
