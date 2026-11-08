@@ -14,9 +14,15 @@ permissions:
   contents: read
 
 jobs:
-  package:
+  build:
     name: Build & Validate Production Package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      pkg_version: ${{ steps.meta.outputs.pkg_version }}
+      is_custom_version: ${{ steps.meta.outputs.is_custom_version }}
 
     steps:
       - name: Checkout triggering commit
@@ -67,32 +73,47 @@ jobs:
             fi
 
             PKG_VERSION="${INPUT_VERSION}"
+            IS_CUSTOM="true"
           else
             PKG_VERSION="main-${SHORT_SHA}"
+            IS_CUSTOM="false"
           fi
 
           printf 'pkg_version=%s\n' "${PKG_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Package version resolved: ${PKG_VERSION} (commit ${SHORT_SHA})"
+          printf 'is_custom_version=%s\n' "${IS_CUSTOM}" >> "$GITHUB_OUTPUT"
+          echo "Package version resolved: ${PKG_VERSION} (commit ${SHORT_SHA}, custom: ${IS_CUSTOM})"
 
       - name: Build production package via release script
         env:
           PKG_VERSION: ${{ steps.meta.outputs.pkg_version }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
           TRIGGER_SHA: ${{ github.sha }}
         run: |
           chmod +x ./scripts/build-release.sh
+
+          # 1. Build canonical flat production distribution package
           ./scripts/build-release.sh \
-            "${PKG_VERSION}" \
+            "production" \
             "${TRIGGER_SHA}" \
             "build-output"
 
+          # 2. Duplicate to commit-stamped version for archival references
+          cp "build-output/upi-gateway-production.zip" "build-output/upi-gateway-main-${SHORT_SHA}.zip"
+          (
+            cd build-output
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "upi-gateway-main-${SHORT_SHA}.zip" > "upi-gateway-main-${SHORT_SHA}.zip.sha256"
+            else
+              shasum -a 256 "upi-gateway-main-${SHORT_SHA}.zip" > "upi-gateway-main-${SHORT_SHA}.zip.sha256"
+            fi
+          )
+
       - name: Validate package integrity and extraction
         env:
-          PKG_VERSION: ${{ steps.meta.outputs.pkg_version }}
           SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
         run: |
-          PKG_NAME="upi-gateway-${PKG_VERSION}"
-          ZIP_FILE="build-output/${PKG_NAME}.zip"
-          SHA_FILE="build-output/${PKG_NAME}.zip.sha256"
+          ZIP_FILE="build-output/upi-gateway-production.zip"
+          SHA_FILE="build-output/upi-gateway-production.zip.sha256"
 
           echo "Validating archive existence..."
           test -f "${ZIP_FILE}" || { echo "Archive file missing: ${ZIP_FILE}"; exit 1; }
@@ -100,7 +121,11 @@ jobs:
 
           echo "Verifying SHA-256 checksum..."
           cd build-output
-          sha256sum -c "${PKG_NAME}.zip.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c "upi-gateway-production.zip.sha256"
+          else
+            shasum -a 256 -c "upi-gateway-production.zip.sha256"
+          fi
           cd ..
 
           echo "Extracting archive into isolated sandbox..."
@@ -113,6 +138,8 @@ jobs:
           test -f "${SANDBOX_DIR}/artisan" || { echo "Missing artisan"; exit 1; }
           test -f "${SANDBOX_DIR}/bootstrap/app.php" || { echo "Missing bootstrap/app.php"; exit 1; }
           test -f "${SANDBOX_DIR}/bootstrap/cache/packages.php" || { echo "Missing bootstrap/cache/packages.php"; exit 1; }
+          test -f "${SANDBOX_DIR}/index.php" || { echo "Missing root index.php"; exit 1; }
+          test -f "${SANDBOX_DIR}/public/index.php" || { echo "Missing public/index.php"; exit 1; }
           test -f "${SANDBOX_DIR}/install.php" || { echo "Missing install.php"; exit 1; }
           test -f "${SANDBOX_DIR}/public/install.php" || { echo "Missing public/install.php"; exit 1; }
           test -f "${SANDBOX_DIR}/.htaccess" || { echo "Missing root .htaccess"; exit 1; }
@@ -131,6 +158,8 @@ jobs:
           test -z "$(find "${SANDBOX_DIR}" -name "*.sqlite*")" || { echo "Forbidden SQLite database present"; exit 1; }
 
           echo "Testing Laravel runtime boot and syntax..."
+          php -l "${SANDBOX_DIR}/index.php"
+          php -l "${SANDBOX_DIR}/public/index.php"
           php -l "${SANDBOX_DIR}/public/install.php"
           php "${SANDBOX_DIR}/artisan" --version
           php "${SANDBOX_DIR}/artisan" about --only=environment
@@ -145,7 +174,7 @@ jobs:
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
             echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| **Package File** | \`${PKG_NAME}.zip\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Package File** | \`upi-gateway-production.zip\` |" >> "$GITHUB_STEP_SUMMARY"
             echo "| **Size** | \`${PKG_SIZE}\` |" >> "$GITHUB_STEP_SUMMARY"
             echo "| **Member Count** | ${TOTAL_FILES} files |" >> "$GITHUB_STEP_SUMMARY"
             echo "| **Target Commit** | \`${SHORT_SHA}\` |" >> "$GITHUB_STEP_SUMMARY"
@@ -165,3 +194,147 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  publish-release:
+    name: Publish Rolling Production Release
+    needs: build
+    if: github.ref == 'refs/heads/main' && needs.build.outputs.is_custom_version == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout triggering commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Download validated package artifacts
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: upi-gateway-main-${{ needs.build.outputs.short_sha }}
+          path: package-dist
+
+      - name: Re-verify package integrity and publish rolling release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIGGER_SHA: ${{ github.sha }}
+          SHORT_SHA: ${{ needs.build.outputs.short_sha }}
+          TAG_NAME: "latest-main"
+        run: |
+          set -euo pipefail
+
+          echo "Validating downloaded artifact integrity..."
+          cd package-dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c "upi-gateway-production.zip.sha256"
+          else
+            shasum -a 256 -c "upi-gateway-production.zip.sha256"
+          fi
+          cd ..
+
+          # Prepare release notes markdown
+          cat << 'EOF' > release-notes.md
+          ## 🚀 UPI Gateway — Latest Main Production Build
+
+          This is an automated, production-ready distribution package generated directly from commit `__TRIGGER_SHA__` (`__SHORT_SHA__`) on the `main` branch.
+
+          ### 📦 Direct 1-Click Download
+          - **Production Package**: [⬇️ `upi-gateway-production.zip`](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip)
+          - **Integrity Checksum**: [`upi-gateway-production.zip.sha256`](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip.sha256)
+
+          ### 🔑 Package Details
+          - **Source Commit**: `__TRIGGER_SHA__` (`__SHORT_SHA__`)
+          - **PHP Compatibility**: PHP 8.2, 8.3, 8.4
+          - **Database**: MySQL 8.0+ / MariaDB 10.x+
+          - **Bundled Assets**: Includes production `vendor/` dependencies, compiled `public/build/` assets, and browser installer (`install.php`).
+          - **No SSH, Composer, or Node.js required on your hosting server.**
+
+          ### 🛠️ 3-Step Hosting Installation
+          1. **Download**: Click the download link above to get `upi-gateway-production.zip`.
+          2. **Upload & Extract**: In cPanel or aaPanel File Manager, upload and extract the ZIP directly into your application directory outside `public_html` or in `/www/wwwroot/domain/`.
+          3. **Install**: Set your domain Document Root / Running Directory to `public/` and open `https://yourdomain.com/` in your browser.
+          EOF
+
+          # Substitute variables safely in release notes
+          sed -i "s/__TRIGGER_SHA__/${TRIGGER_SHA}/g" release-notes.md
+          sed -i "s/__SHORT_SHA__/${SHORT_SHA}/g" release-notes.md
+
+          # Configure git author for tag update
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Update or create the rolling Git tag pointing to TRIGGER_SHA
+          echo "Updating Git tag ${TAG_NAME} to commit ${TRIGGER_SHA}..."
+          git tag -f "${TAG_NAME}" "${TRIGGER_SHA}"
+          git push -f origin "${TAG_NAME}"
+
+          # Verify remote tag points exactly to TRIGGER_SHA
+          git fetch origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+          RESOLVED_SHA=$(git rev-parse -q --verify "refs/tags/${TAG_NAME}^{commit}")
+          if [ "${RESOLVED_SHA}" != "${TRIGGER_SHA}" ]; then
+            echo "Error: Tag ${TAG_NAME} points to ${RESOLVED_SHA}, expected ${TRIGGER_SHA}." >&2
+            exit 1
+          fi
+          echo "Verified: Tag ${TAG_NAME} successfully points to triggering commit ${TRIGGER_SHA}."
+
+          # Publish or update rolling release via GitHub CLI
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Updating existing rolling release ${TAG_NAME}..."
+            gh release edit "${TAG_NAME}" \
+              --title "UPI Gateway — Production Build (${SHORT_SHA})" \
+              --notes-file release-notes.md \
+              --prerelease
+          else
+            echo "Creating rolling release ${TAG_NAME}..."
+            gh release create "${TAG_NAME}" \
+              --title "UPI Gateway — Production Build (${SHORT_SHA})" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --target "${TRIGGER_SHA}"
+          fi
+
+          # Upload release assets with retries to prevent partial upload failure
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          UPLOAD_SUCCESS=false
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Uploading release assets (attempt ${RETRY_COUNT}/${MAX_RETRIES})..."
+            if gh release upload "${TAG_NAME}" \
+              "package-dist/upi-gateway-production.zip.sha256" \
+              "package-dist/upi-gateway-production.zip" \
+              --clobber; then
+              UPLOAD_SUCCESS=true
+              break
+            fi
+            echo "Upload attempt ${RETRY_COUNT} failed. Retrying in 5 seconds..."
+            sleep 5
+          done
+
+          if [ "${UPLOAD_SUCCESS}" != "true" ]; then
+            echo "Error: Failed to upload release assets after ${MAX_RETRIES} attempts." >&2
+            exit 1
+          fi
+
+          # Verify downloaded release assets from GitHub against published SHA-256
+          echo "Verifying published release assets from GitHub..."
+          mkdir -p release-verify
+          gh release download "${TAG_NAME}" \
+            --pattern "upi-gateway-production.zip*" \
+            --dir release-verify \
+            --clobber
+
+          cd release-verify
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c "upi-gateway-production.zip.sha256"
+          else
+            shasum -a 256 -c "upi-gateway-production.zip.sha256"
+          fi
+          cd ..
+          rm -rf release-verify
+          echo "Integrity verified: Published release package matches SHA-256 checksum."
+
+          echo "Rolling release published successfully."

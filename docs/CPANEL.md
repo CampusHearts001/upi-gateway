@@ -43,34 +43,70 @@ If the host terminates HTTPS at a reverse proxy, ask for the IP address or CIDR 
 
 ### Obtaining the production package
 
-#### Option A: Download automated build from GitHub Actions (Recommended)
-Every push to the `main` branch automatically generates a clean, verified, ready-to-install production package with all production dependencies in `vendor/` and compiled frontend assets in `public/build/`:
+#### Option A: Direct 1-Click Download (Recommended)
+Every push to `main` automatically builds, tests, and publishes a verified production package to the rolling GitHub Release. This package is completely flat and pre-bundled with all Composer `vendor/` dependencies and compiled assets in `public/build/`:
 
-1. Open the repository on GitHub and navigate to the **Actions** tab, or open [Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml).
-2. Select the latest completed run on the `main` branch.
-3. Scroll down to the **Artifacts** section at the bottom of the run summary page.
-4. Click `upi-gateway-main-<commit>` to download the artifact bundle.
-5. Extract the downloaded archive on your computer to reveal:
-   - `upi-gateway-main-<commit>.zip` — the installation archive ready to upload to cPanel.
-   - `upi-gateway-main-<commit>.zip.sha256` — the SHA-256 integrity checksum.
-6. Verify package integrity:
+1. Download the latest production package directly:
+   - **Direct ZIP**: [**Download `upi-gateway-production.zip`**](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip)
+   - **Checksum**: [**`upi-gateway-production.zip.sha256`**](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip.sha256)
+2. (Optional) Verify package integrity:
    ```bash
-   sha256sum -c upi-gateway-main-<commit>.zip.sha256
+   sha256sum -c upi-gateway-production.zip.sha256
    # Or on macOS:
-   shasum -a 256 -c upi-gateway-main-<commit>.zip.sha256
+   shasum -a 256 -c upi-gateway-production.zip.sha256
    ```
 
-#### Option B: Build locally from source
+#### Option B: Download via GitHub Actions Artifacts
+You can also download build artifacts from any individual GitHub Actions run:
+1. Open the repository on GitHub and navigate to the **Actions** tab &rarr; [Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml).
+2. Select the latest completed run on `main`.
+3. Scroll to the **Artifacts** section at the bottom and click `upi-gateway-main-<commit>` to download.
+4. Extract the downloaded artifact bundle on your computer to reveal the inner `upi-gateway-production.zip`.
+
+#### Option C: Build locally from source
 If you have Git, PHP 8.2+, Composer, and Node.js installed on your machine:
 ```bash
-./scripts/build-release.sh main-$(git rev-parse --short HEAD) HEAD releases
+./scripts/build-release.sh production HEAD releases
 ```
 
-### Dedicated application directory
-1. In cPanel **File Manager**, create a directory outside `public_html`, e.g., `/home/ACCOUNT/upi-gateway`.
-2. Upload the production ZIP package and extract it there.
-3. Set your domain's Document Root to `/home/ACCOUNT/upi-gateway/public` in **Domains** or **cPanel Subdomains/Addon Domains**.
-4. Set directory permissions on `storage/` and `bootstrap/cache/` to `775` (or writable by the web server user). Never leave `777` permanently.
+### Dedicated application directory (cPanel / aaPanel)
+1. **cPanel**:
+   - In cPanel **File Manager**, create a directory outside `public_html`, e.g., `/home/ACCOUNT/upi-gateway`.
+   - Upload `upi-gateway-production.zip` and extract it directly into that directory.
+   - Set your domain's Document Root to `/home/ACCOUNT/upi-gateway/public` in **Domains** or **Subdomains**.
+2. **aaPanel / Baota (Nginx)**:
+   - In aaPanel **File Manager**, navigate to your website root (e.g. `/www/wwwroot/yourdomain.com`).
+   - Upload `upi-gateway-production.zip` and click **Uncompress**. Ensure the destination is the current website root (do not extract into a subfolder).
+   - In aaPanel **Website** &rarr; Click your domain &rarr; **Site directory**:
+     - Set **Site directory** to your application folder.
+     - Set **Running directory** to `/public` and click **Save**. *(MANDATORY FOR SECURITY)*
+   - In **URL rewrite**, select `laravel5` and click **Save**.
+   - In aaPanel **App Store** &rarr; **PHP (8.2 / 8.3 / 8.4)** &rarr; **Install extensions**: Ensure `fileinfo`, `pdo_mysql`, and `bcmath` are installed.
+3. Set directory permissions on `storage/` and `bootstrap/cache/` to `775` (or writable by the web server user). Never leave `777` permanently.
+
+> [!CAUTION]
+> **Critical Nginx / aaPanel Security Notice:**
+> Unlike Apache and LiteSpeed, **Nginx completely ignores `.htaccess` rewrite and deny rules**. The root `index.php` forwarder exists solely for convenience in Apache environments; **it does NOT protect sensitive files from public download under Nginx**.
+> You **MUST** set the aaPanel **Running directory** to `/public`. If the document root is pointed to the project root on Nginx, attackers can download your `.env` credentials, database passwords, API secrets, and application logs directly over HTTP.
+>
+> As an additional layer of defense-in-depth, you can add the following rules to your Nginx site configuration in aaPanel (**Website** &rarr; Click domain &rarr; **Config**):
+> ```nginx
+> # Strictly deny direct public HTTP access to sensitive files and directories
+> location ~ /\.(env|git|ht) {
+>     deny all;
+>     return 404;
+> }
+>
+> location ~ ^/(app|bootstrap|config|database|resources|routes|storage|vendor)/ {
+>     deny all;
+>     return 404;
+> }
+>
+> location ~ ^/(artisan|composer\.(json|lock)|package(-lock)?\.(json|lock)|phpunit\.xml) {
+>     deny all;
+>     return 404;
+> }
+> ```
 
 If your hosting plan cannot point the domain's document root at `public/`, ask the host to configure that mapping before installing. Keep application source, dependencies, `.env`, and storage outside the public web root.
 

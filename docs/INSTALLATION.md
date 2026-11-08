@@ -8,9 +8,9 @@ The wizard writes `ALLOW_REGISTRATION=false` to `.env`; public `/register` GET a
 
 On first access, the installer creates `storage/installer-setup-token` with private file permissions. Read it from the application directory using cPanel File Manager or a server shell, then enter the 64 characters before the colon on the database setup page. Reopen the file after each attempt because the token rotates; visiting the installer refreshes an expired token. Keep it private; installation removes it after the administrator is created. An existing installation stays locked during a database outage; an incomplete first-time installation can resume with its private setup state and token.
 
-Verify PHP 8.2+ and PDO, PDO MySQL, OpenSSL, mbstring, tokenizer, JSON, cURL, fileinfo, and XML. Create an empty MySQL 8.x or MariaDB 10.x/11.x database and a user able to create and alter tables. The prepared package must contain `vendor/autoload.php` and `public/build/`. Pre-built production packages are generated automatically for every commit on `main` and can be downloaded from the repository's GitHub Actions artifacts (see [CPANEL.md](CPANEL.md#obtaining-the-production-package)).
+Verify PHP 8.2+ and PDO, PDO MySQL, OpenSSL, mbstring, tokenizer, JSON, cURL, fileinfo, and XML. Create an empty MySQL 8.x or MariaDB 10.x/11.x database and a user able to create and alter tables. The prepared package must contain `vendor/autoload.php` and `public/build/`. Pre-built production packages are generated automatically for every commit on `main` and can be downloaded directly from [GitHub Releases (`latest-main`)](https://github.com/mynkdev-21/upi-gateway/releases/tag/latest-main) or as GitHub Actions artifacts (see [CPANEL.md](CPANEL.md#obtaining-the-production-package)).
 
-The web root must be Laravel's `public/` directory. `storage/` and `bootstrap/cache/` must be writable by PHP, and the application must be able to create `.env`. Use HTTPS in production. SQLite is not supported at runtime.
+The web root must be Laravel's `public/` directory (mandatory on Nginx to prevent public access to `.env` and internal files). `storage/` and `bootstrap/cache/` must be writable by PHP, and the application must be able to create `.env`. Use HTTPS in production. SQLite is not supported at runtime.
 
 ## Step-by-step wizard
 

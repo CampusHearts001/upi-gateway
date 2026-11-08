@@ -673,4 +673,118 @@ class CpanelInstallerTest extends TestCase
             }
         }
     }
+
+    // ── 11. Subdirectory & Missing Vendor Redirection Tests ─────────────────
+
+    public function test_uninstalled_redirection_calculates_correct_subdirectory_installer_urls(): void
+    {
+        $cases = [
+            '/' => '/install.php',
+            '/repotest/' => '/repotest/install.php',
+            '/repotest' => '/repotest/install.php',
+            '/repotest/public/' => '/repotest/install.php',
+            '/repotest/public' => '/repotest/install.php',
+            '/repotest/public/index.php' => '/repotest/install.php',
+            '/index.php' => '/install.php',
+            '/public/' => '/install.php',
+            '/public' => '/install.php',
+            '/public/index.php' => '/install.php',
+            '/sub/nested/dir/' => '/sub/nested/dir/install.php',
+            '/sub/nested/dir/public/index.php' => '/sub/nested/dir/install.php',
+        ];
+
+        foreach ($cases as $path => $expected) {
+            $dir = preg_match('~\.php$~i', $path) ? dirname($path) : rtrim($path, '/');
+            $baseUri = rtrim(preg_replace('~/public$~i', '', $dir), '/');
+            $actual = ($baseUri === '' ? '' : $baseUri).'/install.php';
+            $this->assertSame($expected, $actual, "Failed resolving installer URL for path: {$path}");
+        }
+    }
+
+    public function test_public_index_subprocess_uninstalled_redirection(): void
+    {
+        $tempDir = sys_get_temp_dir().'/upi_redirect_test_'.bin2hex(random_bytes(6));
+        mkdir($tempDir.'/repotest/public', 0755, true);
+        mkdir($tempDir.'/repotest/vendor', 0755, true);
+        file_put_contents($tempDir.'/repotest/vendor/autoload.php', "<?php // mock autoload\n");
+        copy(base_path('public/index.php'), $tempDir.'/repotest/public/index.php');
+
+        $port = rand(18200, 19900);
+        $cmd = sprintf('php -S 127.0.0.1:%d -t %s', $port, escapeshellarg($tempDir));
+        $descriptorSpec = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $process = proc_open($cmd, $descriptorSpec, $pipes);
+        usleep(250000); // 250ms startup delay
+
+        try {
+            $testCases = [
+                '/repotest/public/' => 'Location: /repotest/install.php',
+                '/repotest/public/index.php' => 'Location: /repotest/install.php',
+            ];
+
+            foreach ($testCases as $uri => $expectedHeader) {
+                $ch = curl_init("http://127.0.0.1:{$port}{$uri}");
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                curl_setopt($ch, CURLOPT_HEADER, true);
+                curl_setopt($ch, CURLOPT_NOBODY, true);
+                curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+                $response = (string) curl_exec($ch);
+                curl_close($ch);
+
+                $this->assertStringContainsString(
+                    $expectedHeader,
+                    $response,
+                    "Subprocess redirect failed for URI: {$uri}. Response:\n{$response}"
+                );
+                $this->assertStringContainsString('302 Found', $response);
+            }
+        } finally {
+            if (is_resource($process)) {
+                proc_terminate($process);
+                proc_close($process);
+            }
+            @unlink($tempDir.'/repotest/public/index.php');
+            @unlink($tempDir.'/repotest/vendor/autoload.php');
+            @rmdir($tempDir.'/repotest/public');
+            @rmdir($tempDir.'/repotest/vendor');
+            @rmdir($tempDir.'/repotest');
+            @rmdir($tempDir);
+        }
+    }
+
+    public function test_public_index_subprocess_renders_missing_vendor_card(): void
+    {
+        $tempDir = sys_get_temp_dir().'/upi_vendor_test_'.bin2hex(random_bytes(6));
+        mkdir($tempDir.'/public', 0755, true);
+        copy(base_path('public/index.php'), $tempDir.'/public/index.php');
+
+        try {
+            $cmd = sprintf(
+                'php %s',
+                escapeshellarg($tempDir.'/public/index.php')
+            );
+            $descriptorSpec = [
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ];
+            $proc = proc_open($cmd, $descriptorSpec, $pipes);
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $exitCode = proc_close($proc);
+
+            $this->assertSame(1, $exitCode);
+            $this->assertStringContainsString('Missing Application Dependencies', $stdout);
+            $this->assertStringContainsString('upi-gateway-production.zip', $stdout);
+            $this->assertStringContainsString('SETUP ERROR', $stdout);
+        } finally {
+            @unlink($tempDir.'/public/index.php');
+            @rmdir($tempDir.'/public');
+            @rmdir($tempDir);
+        }
+    }
 }

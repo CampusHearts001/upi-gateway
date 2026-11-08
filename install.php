@@ -232,8 +232,45 @@ if ($alreadyInstalled && ! $showCompletion) {
 // ── 4. Wizard Helpers ────────────────────────────────────────────────────────
 if (! file_exists($baseDir.'/vendor/autoload.php')) {
     http_response_code(500);
-    echo '<p style="color:red;padding:2rem;">Missing vendor/ dependencies. Please ensure the full distribution package is uploaded.</p>';
-
+    header('Content-Type: text/html; charset=utf-8');
+    ?>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Setup Error · UPI Gateway</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; padding: 2rem; display: flex; align-items: center; justify-content: center; min-height: 85vh; }
+            .card { background: #ffffff; max-width: 600px; width: 100%; padding: 2.25rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); border: 1px solid #e2e8f0; }
+            .badge { display: inline-block; padding: 0.35rem 0.85rem; border-radius: 9999px; background: #fee2e2; color: #991b1b; font-size: 0.8rem; font-weight: 700; margin-bottom: 1rem; }
+            h1 { font-size: 1.35rem; margin-bottom: 0.75rem; color: #0f172a; margin-top: 0; }
+            p { color: #475569; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1rem; }
+            .box { background: #f1f5f9; border-left: 4px solid #4f46e5; padding: 1rem; border-radius: 0.375rem; font-size: 0.9rem; margin: 1.25rem 0; color: #1e293b; }
+            .box ul { margin: 0.5rem 0 0 1.25rem; padding: 0; }
+            .box li { margin-bottom: 0.35rem; }
+            .btn { display: inline-block; padding: 0.75rem 1.5rem; background: #4f46e5; color: white; text-decoration: none; border-radius: 0.5rem; font-weight: 600; font-size: 0.95rem; text-align: center; }
+            .btn:hover { background: #4338ca; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <span class="badge">SETUP ERROR</span>
+            <h1>Missing Application Dependencies</h1>
+            <p>The required <code>vendor/autoload.php</code> file was not found on this server. This application requires the pre-bundled production package to run without SSH or Composer.</p>
+            <div class="box">
+                <strong>Common Causes &amp; Solutions:</strong>
+                <ul>
+                    <li><strong>Source Code vs Production Package:</strong> If you downloaded the repository via GitHub&rsquo;s &ldquo;Code &rarr; Download ZIP&rdquo; or <code>git clone</code>, it does not include <code>vendor/</code>. Please download the official ready-to-install package below.</li>
+                    <li><strong>Nested Extraction:</strong> If your hosting File Manager extracted files into a subfolder (e.g., <code>upi-gateway-main-.../</code>), move all files directly into the website directory.</li>
+                    <li><strong>Incomplete Extraction:</strong> Ensure your hosting account has enough disk space and file inode quota.</li>
+                </ul>
+            </div>
+            <a href="https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip" class="btn" target="_blank" rel="noopener">Download Ready-to-Install Package</a>
+        </div>
+    </body>
+    </html>
+    <?php
     return;
 }
 
@@ -390,7 +427,10 @@ if ($method === 'POST' && ! $error) {
 // ── 6. Step Views ────────────────────────────────────────────────────────────
 $requirements = $installer->checkRequirements();
 $allPassed = $installer->allRequirementsPassed();
-$currentUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http').'://'.($_SERVER['HTTP_HOST'] ?? 'localhost').preg_replace('/\/install(\.php)?.*$/i', '', $_SERVER['REQUEST_URI'] ?? '');
+$scheme = installer_is_https($_SERVER) ? 'https' : 'http';
+$host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+$subPath = preg_replace('/\/install(\.php)?.*$/i', '', $_SERVER['REQUEST_URI'] ?? '');
+$currentUrl = $scheme.'://'.$host.$subPath;
 
 ?>
 <!DOCTYPE html>
