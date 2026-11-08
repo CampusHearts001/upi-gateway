@@ -1,5 +1,6 @@
 <?php
 
+use App\Support\DeploymentUrl;
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Request;
 
@@ -79,6 +80,17 @@ if (! file_exists(__DIR__.'/../vendor/autoload.php')) {
     exit(1);
 }
 
+require_once __DIR__.'/../app/Support/DeploymentUrl.php';
+$deploymentBasePath = DeploymentUrl::basePath($_SERVER);
+$deploymentRequestPath = (string) parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+if ($deploymentRequestPath === $deploymentBasePath.'/__upi_deployment_check') {
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    echo json_encode(['application' => 'upi-gateway', 'routing' => true, 'base_path' => $deploymentBasePath]);
+
+    return;
+}
+
 // ── 3. Uninstalled Application Redirection (Domain Root & Subdirectory) ──────
 if (! is_file(__DIR__.'/../.env')) {
     $uri = $_SERVER['REQUEST_URI'] ?? '/';
@@ -92,9 +104,7 @@ if (! is_file(__DIR__.'/../.env')) {
     }
 
     // For any other initial request on an uninstalled application, redirect to install.php
-    $dir = preg_match('~\.php$~i', $path) ? dirname($path) : rtrim($path, '/');
-    $baseUri = rtrim(preg_replace('~/public$~i', '', $dir), '/');
-    $installUrl = ($baseUri === '' ? '' : $baseUri).'/install.php';
+    $installUrl = $deploymentBasePath.'/install.php';
     header('Location: '.$installUrl, true, 302);
 
     return;

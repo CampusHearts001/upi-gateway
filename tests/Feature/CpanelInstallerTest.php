@@ -617,6 +617,8 @@ class CpanelInstallerTest extends TestCase
         $tempDir = sys_get_temp_dir().'/upi_redirect_test_'.bin2hex(random_bytes(6));
         mkdir($tempDir.'/repotest/public', 0755, true);
         mkdir($tempDir.'/repotest/vendor', 0755, true);
+        mkdir($tempDir.'/repotest/app/Support', 0755, true);
+        copy(base_path('app/Support/DeploymentUrl.php'), $tempDir.'/repotest/app/Support/DeploymentUrl.php');
         file_put_contents($tempDir.'/repotest/vendor/autoload.php', "<?php // mock autoload\n");
         copy(base_path('public/index.php'), $tempDir.'/repotest/public/index.php');
 
@@ -659,6 +661,9 @@ class CpanelInstallerTest extends TestCase
             }
             @unlink($tempDir.'/repotest/public/index.php');
             @unlink($tempDir.'/repotest/vendor/autoload.php');
+            @unlink($tempDir.'/repotest/app/Support/DeploymentUrl.php');
+            @rmdir($tempDir.'/repotest/app/Support');
+            @rmdir($tempDir.'/repotest/app');
             @rmdir($tempDir.'/repotest/public');
             @rmdir($tempDir.'/repotest/vendor');
             @rmdir($tempDir.'/repotest');
@@ -851,8 +856,9 @@ class CpanelInstallerTest extends TestCase
         $this->assertTrue($diag['is_subdirectory']);
         $this->assertSame('/repotest', $diag['subdirectory_path']);
         $this->assertTrue($diag['requires_nginx_rules']);
-        $this->assertStringContainsString('location /repotest', $diag['nginx_rule_snippet']);
-        $this->assertStringContainsString('/public/build/', $diag['nginx_rule_snippet']);
+        $this->assertStringContainsString('location ^~ "/repotest/"', $diag['nginx_rule_snippet']);
+        $this->assertStringContainsString('alias "'.base_path('public').'/', $diag['nginx_rule_snippet']);
+        $this->assertStringContainsString('fastcgi_param SCRIPT_FILENAME', $diag['nginx_rule_snippet']);
 
         // Apache at domain root with public docroot
         $diagApache = $installer->detectEnvironmentDiagnostics(null, [

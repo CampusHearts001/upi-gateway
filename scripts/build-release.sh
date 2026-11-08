@@ -303,6 +303,7 @@ check_forbidden "phpunit.xml" "PHPUnit test configuration"
 check_forbidden "vendor/phpunit" "PHPUnit development vendor package"
 check_forbidden "vendor/fakerphp" "FakerPHP development vendor package"
 check_forbidden "vendor/mockery" "Mockery development vendor package"
+check_forbidden "deployment-private-check.txt" "test fixture file"
 
 # 5. Core application & security files
 check_required "vendor/autoload.php" "Composer autoloader"

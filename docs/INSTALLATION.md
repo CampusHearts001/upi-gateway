@@ -23,9 +23,9 @@ The installation wizard includes intelligent URL detection that accurately ident
 - The public host name and port.
 - Any subdirectory path prefix (e.g. `/repotest` or `/payment`).
 
-On Nginx servers hosting the application in a subdirectory, the wizard automatically performs **Environment Diagnostics** and displays a copy-ready configuration snippet to ensure clean route handling and strict file protection without infinite redirect loops.
+The installer performs browser checks of clean routing, actual production assets and private-file protection. Nginx requires a public-only server mount; the wizard generates it using the detected prefix and physical public path, plus the PHP-FPM address supplied from the active panel handler. It does not apply server configuration automatically. See [deployment modes and panel instructions](DEPLOYMENT.md).
 
-The web root must be Laravel's `public/` directory (or protected via server rewrite rules on subdirectory deployments to prevent public access to `.env` and internal files). `storage/` and `bootstrap/cache/` must be writable by PHP, and the application must be able to create `.env`. Use HTTPS in production. SQLite is not supported at runtime.
+The document root or URL mount must expose only Laravel's `public/` directory. `storage/` and `bootstrap/cache/` must be writable by PHP, and the application must be able to create `.env`. Use HTTPS in production. SQLite is not supported at runtime.
 
 ## Step-by-step wizard
 

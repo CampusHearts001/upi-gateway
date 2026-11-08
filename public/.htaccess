@@ -17,6 +17,8 @@
 
     # Block access to hidden files and sensitive directories
     RewriteRule (^|/)\.(?!well-known) - [F]
+    RewriteRule ^(app|bootstrap|config|database|resources|routes|vendor|tests|scripts)(/|$) - [F,L,NC]
+    RewriteRule ^(?!index\.php$|install\.php$).*\.(php[0-9]?|phtml|phar)(/|$) - [F,L,NC]
 
     # Redirect Trailing Slashes If Not A Folder...
     RewriteCond %{REQUEST_FILENAME} !-d

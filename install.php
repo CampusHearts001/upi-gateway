@@ -1,5 +1,6 @@
 <?php
 
+use App\Support\DeploymentUrl;
 use App\Support\InstallationManager;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\Artisan;
@@ -24,6 +25,9 @@ if (version_compare(PHP_VERSION, '8.2.0', '<')) {
 
 $baseDir = __DIR__;
 $installedFile = $baseDir.'/storage/installed';
+require_once $baseDir.'/app/Support/DeploymentUrl.php';
+$installerBasePath = DeploymentUrl::basePath($_SERVER);
+$installerUrl = $installerBasePath.'/install.php';
 
 if (! function_exists('installer_ip_in_range')) {
     function installer_ip_in_range(string $ip, string $range): bool
@@ -155,9 +159,11 @@ if (! function_exists('installer_is_https')) {
 if (session_status() === PHP_SESSION_NONE) {
     $isHttps = installer_is_https($_SERVER);
 
+    session_name('upi_setup_'.substr(hash('sha256', $baseDir.$installerBasePath), 0, 16));
     ini_set('session.cookie_httponly', '1');
     ini_set('session.use_only_cookies', '1');
     ini_set('session.use_strict_mode', '1');
+    ini_set('session.cookie_path', $installerBasePath.'/');
     if ($isHttps) {
         ini_set('session.cookie_secure', '1');
     }
@@ -221,7 +227,7 @@ if ($alreadyInstalled && ! $showCompletion) {
             <span class="badge">INSTALLATION LOCKED</span>
             <h1>Application Already Installed</h1>
             <p>The installation wizard has been permanently locked for security to protect existing accounts and transaction data.</p>
-            <a href="login" class="btn">Go to Merchant Dashboard</a>
+            <a href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn">Go to Merchant Dashboard</a>
         </div>
     </body>
     </html>
@@ -305,7 +311,7 @@ if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_s
         http_response_code(403);
         $error = 'Database setup must be completed before proceeding.';
     } else {
-        header('Location: install.php?step=database');
+        header('Location: '.$installerUrl.'?step=database');
 
         return;
     }
@@ -368,7 +374,7 @@ if ($method === 'POST' && ! $error) {
                 session_regenerate_id(true);
                 $_SESSION['_installer_db_configured'] = true;
                 $_SESSION['_installer_setup_authorized'] = true;
-                header('Location: install.php?step=migrate');
+                header('Location: '.$installerUrl.'?step=migrate');
 
                 return;
             } catch (Throwable) {
@@ -380,7 +386,7 @@ if ($method === 'POST' && ! $error) {
             $exitCode = Artisan::call('migrate', ['--force' => true]);
             if ($exitCode === 0 && $installer->databaseIsMigrated()) {
                 $_SESSION['_installer_migrated'] = true;
-                header('Location: install.php?step=admin');
+                header('Location: '.$installerUrl.'?step=admin');
 
                 return;
             } else {
@@ -412,7 +418,7 @@ if ($method === 'POST' && ! $error) {
                 $_SESSION = [];
                 session_regenerate_id(true);
                 $_SESSION['_installer_completed'] = true;
-                header('Location: install.php?step=done');
+                header('Location: '.$installerUrl.'?step=done');
 
                 return;
             } catch (Throwable $e) {
@@ -515,10 +521,13 @@ $currentUrl = $diagnostics['detected_app_url'];
             <?php if (! empty($diagnostics['requires_nginx_rules'])) { ?>
                 <div class="alert-notice">
                     <strong>Nginx Subdirectory Configuration Notice:</strong><br>
-                    Detected web server <strong><?= htmlspecialchars($diagnostics['server_software'], ENT_QUOTES, 'UTF-8') ?></strong> in subdirectory <code><?= htmlspecialchars($diagnostics['subdirectory_path'], ENT_QUOTES, 'UTF-8') ?></code>. Nginx does not process <code>.htaccess</code>. To ensure clean routes and secure internal files, add the following URL rewrite rules in your control panel (aaPanel / cPanel Nginx / Plesk):
-                    <pre><?= htmlspecialchars($diagnostics['nginx_rule_snippet'], ENT_QUOTES, 'UTF-8') ?></pre>
+                    Detected web server <strong><?= htmlspecialchars($diagnostics['server_software'], ENT_QUOTES, 'UTF-8') ?></strong> in subdirectory <code><?= htmlspecialchars($diagnostics['subdirectory_path'], ENT_QUOTES, 'UTF-8') ?></code>. Nginx does not process <code>.htaccess</code>. Back up the domain configuration in your panel. Replace the PHP-FPM placeholder below with the socket from the active panel PHP handler, then add these locations to the existing server block. Preserve its root and other website locations. The application cannot apply this server configuration automatically.
+                    <label>PHP-FPM address from the active panel PHP handler <input data-php-handler placeholder="unix:/path/from/your/panel.sock"></label>
+                    <button type="button" data-copy-nginx disabled>Copy configuration</button>
+                    <pre data-nginx-config><?= htmlspecialchars($diagnostics['nginx_rule_snippet'], ENT_QUOTES, 'UTF-8') ?></pre>
                 </div>
             <?php } ?>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl])->render() ?>
             <ul class="req-list">
                 <?php foreach ($requirements as $r) { ?>
                     <li class="req-item">
@@ -528,7 +537,7 @@ $currentUrl = $diagnostics['detected_app_url'];
                 <?php } ?>
             </ul>
             <?php if ($allPassed) { ?>
-                <a href="install.php?step=database" class="btn">Continue to Database Setup &rarr;</a>
+                <a data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=database" class="btn">Continue to Database Setup &rarr;</a>
             <?php } else { ?>
                 <button disabled class="btn">Requirements Unmet &mdash; Please enable modules in cPanel</button>
             <?php } ?>
@@ -536,7 +545,7 @@ $currentUrl = $diagnostics['detected_app_url'];
         <?php } elseif ($step === 'database') { ?>
             <h2>Database Configuration</h2>
             <p class="subtitle">Enter your MySQL database credentials created in cPanel MySQL Databases.</p>
-            <form method="POST" action="install.php?step=database">
+            <form method="POST" action="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=database">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                 <div class="form-group">
                     <label>Application Name</label>
@@ -575,7 +584,7 @@ $currentUrl = $diagnostics['detected_app_url'];
         <?php } elseif ($step === 'migrate') { ?>
             <h2>Database Migrations</h2>
             <p class="subtitle">The database configuration was saved. Click below to create all required database tables safely in-process.</p>
-            <form method="POST" action="install.php?step=migrate">
+            <form method="POST" action="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=migrate">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                 <button type="submit" class="btn">Run Database Migrations Now</button>
             </form>
@@ -583,7 +592,7 @@ $currentUrl = $diagnostics['detected_app_url'];
         <?php } elseif ($step === 'admin') { ?>
             <h2>Create Primary Administrator</h2>
             <p class="subtitle">Set up the master administrator account for dashboard access and API configuration.</p>
-            <form method="POST" action="install.php?step=admin">
+            <form method="POST" action="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=admin">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                 <div class="form-group">
                     <label>Administrator Name</label>
@@ -611,7 +620,7 @@ $currentUrl = $diagnostics['detected_app_url'];
             <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 0.5rem;">Add these two jobs in cPanel &rarr; Cron Jobs (running every minute):</p>
             <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan schedule:run &gt;&gt; storage/logs/scheduler.log 2&gt;&amp;1</div>
             <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan queue:work database --queue=default --stop-when-empty --max-time=50 --tries=6 --timeout=60 --memory=128 --sleep=3 &gt;&gt; storage/logs/queue.log 2&gt;&amp;1</div>
-            <a href="login" class="btn" style="margin-top: 1.5rem;">Proceed to Merchant Login &rarr;</a>
+            <a href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Proceed to Merchant Login &rarr;</a>
         <?php } ?>
     </div>
 </div>

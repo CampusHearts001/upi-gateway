@@ -216,34 +216,18 @@ class InstallationManager
         $rawHost = (string) ($server['HTTP_HOST'] ?? $server['SERVER_NAME'] ?? 'localhost');
         $rawHost = trim($rawHost);
 
-        // Normalize host and port: remove :80 for http and :443 for https
-        if (str_contains($rawHost, ':')) {
-            [$hostname, $port] = explode(':', $rawHost, 2);
-            $port = (int) $port;
-            if (($scheme === 'http' && $port === 80) || ($scheme === 'https' && $port === 443)) {
-                $host = $hostname;
-            } else {
-                $host = $hostname.':'.$port;
-            }
-        } else {
-            $host = $rawHost;
+        $authority = parse_url($scheme.'://'.$rawHost);
+        if (! is_array($authority) || empty($authority['host']) || isset($authority['path'])
+            || isset($authority['user']) || isset($authority['query']) || isset($authority['fragment'])) {
+            throw new \InvalidArgumentException('The request host is invalid.');
+        }
+        $host = $authority['host'];
+        $port = $authority['port'] ?? null;
+        if ($port !== null && ! (($scheme === 'http' && $port === 80) || ($scheme === 'https' && $port === 443))) {
+            $host .= ':'.$port;
         }
 
-        // Extract subdirectory path
-        $scriptName = str_replace('\\', '/', (string) ($server['SCRIPT_NAME'] ?? ''));
-        $scriptDir = dirname($scriptName);
-        $scriptDir = preg_replace('~/public$~i', '', $scriptDir);
-
-        if ($scriptDir !== '/' && $scriptDir !== '.' && $scriptDir !== '' && ! empty($scriptDir)) {
-            $basePath = rtrim($scriptDir, '/');
-        } else {
-            $uri = (string) ($server['REQUEST_URI'] ?? '');
-            $path = parse_url($uri, PHP_URL_PATH) ?: '';
-            $basePath = preg_replace('~/(install(\.php)?|public(/install(\.php)?)?|index\.php).*$~i', '', $path);
-            $basePath = rtrim((string) $basePath, '/');
-        }
-
-        return $scheme.'://'.$host.($basePath === '' ? '' : $basePath);
+        return DeploymentUrl::normalize($scheme.'://'.$host.DeploymentUrl::basePath($server));
     }
 
     public function detectEnvironmentDiagnostics($request = null, array $server = []): array
@@ -276,26 +260,7 @@ class InstallationManager
         $isHttps = $this->isHttps($server);
         $requiresNginxNotice = ($serverType === 'nginx') && ($isSubdirectory || ! $docRootIsPublic);
 
-        $docRootDisplay = $documentRoot !== '' ? rtrim($documentRoot, '/') : '/www/wwwroot/domain';
-        $nginxSnippet = <<<NGINX
-# UPI Gateway — Nginx Subdirectory & Security Rules ({$subPrefix})
-location ~ ^{$subPrefix}/(\\.(env|git|ht)|app|bootstrap|config|database|resources|routes|storage|vendor|tests|scripts) {
-    deny all;
-    return 404;
-}
-location ~ ^{$subPrefix}/(artisan|composer\\.(json|lock)|package(-lock)?\\.(json|lock)|phpunit\\.xml) {
-    deny all;
-    return 404;
-}
-location ^~ {$subPrefix}/build/ {
-    alias {$docRootDisplay}{$subPrefix}/public/build/;
-    access_log off;
-    expires 30d;
-}
-location {$subPrefix} {
-    try_files \$uri {$subPrefix}/index.php?\$query_string;
-}
-NGINX;
+        $nginxSnippet = DeploymentConfiguration::nginx($appUrl, base_path('public'));
 
         return [
             'server_software' => $rawSoftware !== '' ? $rawSoftware : 'Unknown',
@@ -307,6 +272,8 @@ NGINX;
             'document_root_is_public' => $docRootIsPublic,
             'requires_nginx_rules' => $requiresNginxNotice,
             'nginx_rule_snippet' => trim($nginxSnippet),
+            'public_path' => public_path(),
+            'php_handler_required' => $requiresNginxNotice,
         ];
     }
 
@@ -602,6 +569,7 @@ NGINX;
     public function writeEnvironment(array $data): void
     {
         $data['app_url'] = rtrim(trim($data['app_url']), '/');
+        $data['app_url'] = DeploymentUrl::normalize($data['app_url']);
         $path = $this->envPath();
         $template = base_path('.env.example');
         $env = is_file($path) ? file_get_contents($path) : file_get_contents($template);
@@ -627,6 +595,9 @@ NGINX;
             'APP_DEBUG' => 'false',
             'ALLOW_REGISTRATION' => 'false',
             'APP_URL' => $this->envValue($data['app_url']),
+            'ASSET_URL' => $this->envValue($data['app_url']),
+            'SESSION_PATH' => $this->envValue(DeploymentUrl::cookiePath($data['app_url'])),
+            'SESSION_COOKIE' => $this->envValue(DeploymentUrl::cookieName($data['app_url'])),
             'LOG_LEVEL' => 'error',
             'SESSION_SECURE_COOKIE' => str_starts_with(strtolower($data['app_url']), 'https://') ? 'true' : 'false',
             'GATEWAY_VERIFICATION_NODE_ID' => $this->envValue($nodeId),
@@ -666,6 +637,9 @@ NGINX;
             'app.env' => 'production',
             'app.debug' => false,
             'app.url' => $data['app_url'],
+            'app.asset_url' => $data['app_url'],
+            'session.path' => DeploymentUrl::cookiePath($data['app_url']),
+            'session.cookie' => DeploymentUrl::cookieName($data['app_url']),
             'session.secure' => str_starts_with(strtolower($data['app_url']), 'https://'),
             'gateway.verification_node_id' => $nodeId,
         ]);

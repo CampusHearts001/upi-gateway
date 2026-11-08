@@ -109,49 +109,23 @@ If you have Git, PHP 8.2+, Composer, and Node.js installed on your machine:
   - In **URL rewrite**, select `laravel5` and click **Save**.
 - **Subdirectory Under Existing Website (e.g., `/repotest/`):**
   - If deploying UPI Gateway inside a subdirectory of an existing aaPanel website where the main domain's document root cannot be changed:
-  - In aaPanel **Website** &rarr; Click your domain &rarr; **Config**, add the following block inside the `server { ... }` configuration before any generic PHP handlers:
-    ```nginx
-    # ==============================================================================
-    # UPI Gateway Subdirectory Configuration (Replace /repotest/ with your folder)
-    # ==============================================================================
-
-    # 1. Deny sensitive internal application directories and files
-    location ~ ^/repotest/(\.(env|git|ht)|app|bootstrap|config|database|resources|routes|storage|vendor|tests|scripts)(/|$) {
-        return 403;
-    }
-    location ~ ^/repotest/(artisan|composer\.(json|lock)|package(-lock)?\.(json|lock)|phpunit\.xml) {
-        return 403;
-    }
-
-    # 2. Vite compiled production assets (alias to public/build)
-    location ^~ /repotest/build/ {
-        alias /www/wwwroot/yourdomain.com/repotest/public/build/;
-        access_log off;
-        expires 30d;
-    }
-
-    # 3. Main subdirectory route handler (omit ^~ so preceding regex deny rules take effect)
-    location /repotest/ {
-        # Route virtual paths directly to index.php (avoid $uri/ to prevent directory collisions)
-        try_files $uri /repotest/index.php?$query_string;
-    }
-    ```
-  - Test and reload Nginx configuration in aaPanel.
+  - Configure a public-only mount using the installer-generated configuration described in [Domains, subdomains and subdirectories](DEPLOYMENT.md). Keep the main website's root unchanged. The installer asks for the PHP-FPM address from the active panel PHP handler rather than guessing it.
+  - Back up the active domain configuration, validate it through the panel before reloading, and run the browser routing/assets/private-file checks. Do not enter database credentials while private files remain publicly reachable.
 
 #### 3. CyberPanel (OpenLiteSpeed)
 
 - **Native `.htaccess` Support:**
-  - OpenLiteSpeed processes `.htaccess` rules automatically for both dedicated domains and subdirectories.
-  - After extracting the package, navigate to CyberPanel &rarr; **Websites** &rarr; **Manage** &rarr; **vHost Conf** or restart OpenLiteSpeed via `systemctl restart lsws` to ensure rewrite rules are loaded into memory.
+  - Enable rewrite rules and automatic `.htaccess` loading in the virtual host/context. Verify the clean routes using the installer's browser checks; do not assume uploaded rules are already active.
+  - After extracting the package, use CyberPanel &rarr; **Websites** &rarr; **Manage** &rarr; **vHost Conf** and the panel's reload controls. For subdirectories, map a context only to the application's `public` directory as described in [deployment modes](DEPLOYMENT.md).
   - For dedicated domains, set the Virtual Host's `docRoot` to `$VH_ROOT/public_html/public`.
 
 #### 4. Plesk & DirectAdmin
 
 - **Apache with Nginx Reverse Proxy:**
-  - Works out-of-the-box using the provided `.htaccess` file.
-  - Ensure Nginx proxy mode forwards virtual routes to Apache, or enable **Smart static files processing**.
+  - Configure the public-only mount in both serving layers as needed. Apache `.htaccess` does not protect files served directly by Nginx.
+  - Verify virtual routes, static assets and private-file protection with the browser checks before entering database credentials.
 - **Nginx Standalone Mode:**
-  - Add the `try_files` rule and internal directory block rules to **Additional Nginx Directives** matching the aaPanel Nginx snippet above.
+  - Use the installer-generated public-only Nginx configuration in a panel field that accepts locations, or ask the hosting provider to apply it. See [deployment modes and PHP-handler requirements](DEPLOYMENT.md).
 
 ### Dedicated application directory (cPanel / aaPanel)
 1. **cPanel**:

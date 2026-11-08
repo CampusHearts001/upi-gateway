@@ -5,6 +5,7 @@ use App\Http\Middleware\EnsureActive;
 use App\Http\Middleware\EnsureAdmin;
 use App\Http\Middleware\RedirectToInstall;
 use App\Http\Middleware\SecurityHeaders;
+use App\Http\Middleware\SetDeploymentBasePath;
 use App\Http\Middleware\TrustConfiguredProxies;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -21,6 +22,7 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->prepend(SetDeploymentBasePath::class);
         $middleware->replace(TrustProxies::class, TrustConfiguredProxies::class);
 
         $middleware->alias([
@@ -44,7 +46,7 @@ return Application::configure(basePath: dirname(__DIR__))
             RedirectToInstall::class,
         ]);
 
-        $middleware->redirectUsersTo('/dashboard');
+        $middleware->redirectUsersTo(fn () => route('dashboard'));
 
         // Paytm PG POSTs the customer back here from its own domain.
         $middleware->validateCsrfTokens(except: ['pay/*/return']);

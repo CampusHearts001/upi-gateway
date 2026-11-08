@@ -10,6 +10,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\InstallController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\PaymentAccountController;
+use App\Http\Controllers\PublicStorageController;
 use App\Http\Controllers\SandboxCheckoutController;
 use App\Http\Controllers\SettingsController;
 use App\Http\Middleware\RedirectIfInstalled;
@@ -42,6 +43,7 @@ Route::middleware(RedirectIfInstalled::class)->prefix('install')->name('install.
 
 Route::view('/', 'welcome')->name('home');
 Route::view('/docs', 'docs')->name('docs');
+Route::get('/storage/{path}', PublicStorageController::class)->where('path', '.*')->name('storage.public');
 
 // ── Public checkout pages ─────────────────────────────────────────────────────
 Route::get('/pay/{order}', [CheckoutController::class, 'show'])->name('pay.show');

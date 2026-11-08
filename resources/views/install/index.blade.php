@@ -12,14 +12,18 @@
         <span>Nginx Subdirectory Configuration Notice</span>
     </div>
     <p class="mt-1 text-xs text-amber-800 leading-relaxed">
-        Detected web server <strong>{{ $diagnostics['server_software'] }}</strong> in subdirectory <code>{{ $diagnostics['subdirectory_path'] }}</code>. Nginx does not process <code>.htaccess</code> rules. To ensure clean routes and secure internal files, add the following URL rewrite rules in your control panel (aaPanel / cPanel Nginx / Plesk):
+        Nginx does not process <code>.htaccess</code>. Back up the domain configuration in your panel. Replace the PHP-FPM placeholder below with the socket from the active PHP handler, then add these locations to the existing server block, preserving its root and other website locations. The application cannot configure Nginx automatically.
     </p>
     <details class="mt-2 text-xs">
         <summary class="font-medium cursor-pointer text-amber-900 hover:underline">View Nginx configuration rules</summary>
-        <pre class="mt-2 p-3 bg-slate-900 text-emerald-400 rounded-lg overflow-x-auto font-mono text-[11px] leading-snug">{{ $diagnostics['nginx_rule_snippet'] }}</pre>
+        <label>PHP-FPM address from the active panel PHP handler <input data-php-handler placeholder="unix:/path/from/your/panel.sock"></label>
+        <button type="button" data-copy-nginx disabled>Copy configuration</button>
+        <pre data-nginx-config class="mt-2 p-3 bg-slate-900 text-emerald-400 rounded-lg overflow-x-auto font-mono text-[11px] leading-snug">{{ $diagnostics['nginx_rule_snippet'] }}</pre>
     </details>
 </div>
 @endif
+
+@include('install.hosting-check', ['deploymentUrl' => $diagnostics['detected_app_url']])
 
 <div class="mt-6 space-y-2">
     @foreach ($requirements as $req)
@@ -34,7 +38,7 @@
 
 <div class="mt-8">
     @if ($allPass)
-        <a href="{{ route('install.database') }}" class="btn btn-primary w-full justify-center py-2.5">
+        <a data-deployment-continue data-deployment-href="{{ route('install.database') }}" aria-disabled="true" class="btn btn-primary w-full justify-center py-2.5">
             Continue to database setup <x-icon name="arrow-right" class="w-4 h-4" />
         </a>
     @else

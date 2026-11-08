@@ -34,6 +34,7 @@ class AppServiceProvider extends ServiceProvider
                 throw new RuntimeException('Production requires a MySQL database connection.');
             }
             URL::useOrigin(config('app.url'));
+            URL::useAssetOrigin(config('app.asset_url') ?: config('app.url'));
             URL::forceScheme('https');
         }
 
