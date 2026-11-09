@@ -87,6 +87,27 @@ When asking for help, share your hosting provider, PHP version, deployment type 
 
 ---
 
+## 🌐 Live Demo
+
+Explore the UPI Gateway application through our live demo:
+
+**Live Demo:** [https://appnk.site/](https://appnk.site/)
+
+**Demo Login Credentials:**
+
+- Email: `demo@test.com`
+- Password: `demo@test.com`
+
+**Demo Mode — Read Only**
+
+The demo environment allows visitors to log in and explore the application, including the dashboard, orders, accounts and available modules.
+
+For security reasons, all data modification operations are disabled for demo users. Creating, editing, deleting, submitting orders and initiating payments are not permitted.
+
+The demo account has restricted merchant-level access and cannot access administrative functions or API credentials.
+
+---
+
 ## 📦 Release Status
 
 **v1.1.0 is currently a stable release candidate; a v1.1.0 Git tag and GitHub Release have not been published.** The rolling production package is published at the download link above.
