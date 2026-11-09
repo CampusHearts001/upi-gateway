@@ -438,18 +438,18 @@ if ($step === 'requirements') {
 
 if (! $error && $step === 'database') {
     $readiness = $installer->verifyServerReadiness($_SERVER);
-    if (! $readiness['ready'] || empty($_SESSION['_installer_readiness_passed'])) {
+    if (! $readiness['ready']) {
         if ($method === 'POST') {
             http_response_code(403);
-            $error = ! $readiness['ready']
-                ? $readiness['message']
-                : 'Server readiness verification must be completed before database setup.';
+            $error = $readiness['message'];
             $step = 'requirements';
         } else {
             installer_redirect($installerUrl.'?step=requirements');
 
             return;
         }
+    } else {
+        $_SESSION['_installer_readiness_passed'] = true;
     }
 }
 

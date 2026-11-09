@@ -1171,12 +1171,31 @@ class CpanelInstallerTest extends TestCase
     public function test_direct_database_step_access_without_readiness_is_blocked_and_redirected(): void
     {
         $this->removeInstallationMarker();
-        unset($_SESSION['_installer_readiness_passed']);
 
-        // Direct GET access to ?step=database without completing readiness must redirect to requirements
+        $this->partialMock(InstallationManager::class, function ($mock) {
+            $mock->shouldReceive('verifyServerReadiness')->andReturn([
+                'ready' => false,
+                'reason' => 'requirements',
+                'message' => 'Server readiness requirements are not met. Ensure required PHP extensions and writable directories are available.',
+                'handler' => ['supported' => false],
+            ]);
+        });
+
+        // Direct GET access to ?step=database when server readiness fails must redirect to requirements
         $response = $this->get('/install.php?step=database');
         $response->assertStatus(302);
         $response->assertRedirect('/install.php?step=requirements');
+    }
+
+    public function test_direct_database_step_access_with_valid_readiness_is_permitted(): void
+    {
+        $this->removeInstallationMarker();
+
+        // Direct GET access to ?step=database when server readiness passes must succeed
+        $response = $this->get('/install.php?step=database');
+        $response->assertOk();
+        $response->assertSee('Database Configuration');
+        $this->assertTrue($_SESSION['_installer_readiness_passed'] ?? false);
     }
 
     public function test_direct_database_post_bypass_attempt_is_rejected_with_403(): void
@@ -1185,8 +1204,14 @@ class CpanelInstallerTest extends TestCase
         $this->get('/install.php')->assertOk();
         $csrf = $_SESSION['_installer_csrf'];
 
-        // Tamper session to ensure readiness flag is absent
-        unset($_SESSION['_installer_readiness_passed']);
+        $this->partialMock(InstallationManager::class, function ($mock) {
+            $mock->shouldReceive('verifyServerReadiness')->andReturn([
+                'ready' => false,
+                'reason' => 'nginx_root_exposure',
+                'message' => 'Nginx document root must point to the public directory to prevent private file exposure.',
+                'handler' => ['supported' => true],
+            ]);
+        });
 
         $tempEnv = sys_get_temp_dir().'/bypass_test_env_'.bin2hex(random_bytes(6));
         config(['installer.env_path' => $tempEnv]);
@@ -1210,7 +1235,7 @@ class CpanelInstallerTest extends TestCase
         try {
             $response = $this->post('/install.php?step=database', $_POST);
             $response->assertStatus(403);
-            $response->assertSee('Server readiness verification must be completed before database setup.');
+            $response->assertSee('Nginx document root must point to the public directory to prevent private file exposure.');
             $this->assertFileDoesNotExist($tempEnv);
         } finally {
             $_POST = $originalPost;
@@ -1494,6 +1519,18 @@ class CpanelInstallerTest extends TestCase
             'diagnostic_token' => 'any-token',
             'stage' => 'server',
             'message' => 'Post-install probe',
+        ])->assertForbidden();
+
+        // 4. Installed deployment MUST still allow the session-bound CSRF probe
+        $installedProbe = $this->getJson('/__upi_deployment_check')->assertOk()->json();
+        $this->assertTrue($installedProbe['installed']);
+        $this->postJson('/__upi_deployment_check', [
+            'probe' => $installedProbe['probe'],
+        ])->assertOk()->assertJson(['session' => true, 'csrf' => true]);
+
+        // 5. Invalid probe token on installed deployment must be rejected (403)
+        $this->postJson('/__upi_deployment_check', [
+            'probe' => 'invalid-probe-token',
         ])->assertForbidden();
     }
 

@@ -36,11 +36,11 @@ Route::get('/__upi_deployment_check', function (Request $request, InstallationMa
     ])->header('Cache-Control', 'no-store');
 });
 Route::post('/__upi_deployment_check', function (Request $request, InstallationManager $installer) {
-    if ($installer->isInstalled()) {
-        abort(403, 'Application is already installed.');
-    }
-
     if ($request->boolean('diagnostic_report')) {
+        if ($installer->isInstalled()) {
+            abort(403, 'Application is already installed.');
+        }
+
         abort_unless(is_string($request->input('diagnostic_token'))
             && hash_equals((string) $request->session()->pull('deployment.diagnostic'), $request->input('diagnostic_token')), 403);
         $data = $request->validate([
