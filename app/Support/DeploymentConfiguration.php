@@ -6,6 +6,25 @@ use InvalidArgumentException;
 
 class DeploymentConfiguration
 {
+    public static function apache(string $url, string $publicPath): string
+    {
+        $prefix = rtrim((string) parse_url(DeploymentUrl::normalize($url), PHP_URL_PATH), '/');
+        $path = str_replace(['\\', '"', "\n", "\r"], ['/', '\\"', '', ''], rtrim($publicPath, '/'));
+        $mount = $prefix === '' ? 'DocumentRoot "'.$path.'"' : 'Alias "'.$prefix.'/" "'.$path.'/"';
+
+        return <<<APACHE
+# Inside the virtual host, preserving its existing PHP handler.
+# For a subdirectory, the parent DocumentRoot is unchanged.
+{$mount}
+<Directory "{$path}">
+    Options +FollowSymLinks -Indexes
+    AllowOverride All
+    Require all granted
+    DirectoryIndex index.php
+</Directory>
+APACHE;
+    }
+
     public static function nginx(string $url, string $publicPath, string $phpHandler = 'unix:/REPLACE_WITH_PANEL_PHP_FPM_SOCKET'): string
     {
         $prefix = rtrim((string) parse_url(DeploymentUrl::normalize($url), PHP_URL_PATH), '/');
@@ -64,6 +83,7 @@ NGINX;
     # Nested rules remain active while ^~ prevents the parent PHP/static regexes taking over.
     location ~ /\. { return 404; }
     location ~* \.(?:php[0-9]?|phtml|phar)(?:/|\$) { return 404; }
+    location ~* \.(?:sqlite[0-9]*|sql|log|bak|zip|tar|gz)(?:/|\$) { return 404; }
     # Only public files are candidates; private directories such as docs cannot collide.
     try_files \$uri {$name};
 }

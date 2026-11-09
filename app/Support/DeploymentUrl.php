@@ -9,23 +9,38 @@ class DeploymentUrl
 {
     public static function basePath(array $server): string
     {
-        $script = str_replace('\\', '/', (string) ($server['SCRIPT_NAME'] ?? ''));
-        if (preg_match('~/(?:index|install)\.php$~i', $script)) {
-            $path = dirname($script);
-        } else {
-            $path = (string) parse_url((string) ($server['REQUEST_URI'] ?? '/'), PHP_URL_PATH);
-            $path = preg_replace('~/(?:install(?:\.php)?|index\.php)(?:/.*)?$~i', '', $path);
+        $requestPath = (string) parse_url((string) ($server['REQUEST_URI'] ?? '/'), PHP_URL_PATH);
+        $installerPath = null;
+        if (preg_match('~/(?:install(?:\\.php)?(?:/(?:database|migrate|admin|done))?|index\\.php)/?$~i', $requestPath)) {
+            $installerPath = preg_replace('~/(?:install(?:\\.php)?(?:/(?:database|migrate|admin|done))?|index\\.php)/?$~i', '', $requestPath);
+        }
+        $mount = null;
+        foreach (['SCRIPT_NAME', 'ORIG_SCRIPT_NAME'] as $key) {
+            $script = str_replace('\\', '/', (string) ($server[$key] ?? ''));
+            if (preg_match('~/(?:index|install)\\.php(?:/.*)?$~i', $script)) {
+                $mount = preg_replace('~/(?:index|install)\\.php(?:/.*)?$~i', '', $script);
+                break;
+            }
+        }
+        $clean = static function (string $path): string {
+            $path = preg_replace('~/public/?$~i', '', rtrim($path, '/'));
+
+            return $path === '.' || $path === '/' ? '' : rtrim($path, '/');
+        };
+        $mount = $mount !== null ? $clean($mount) : null;
+        // A panel may report /index.php despite a prefixed installer URL. Use
+        // the explicit installer path as corroboration, never a forwarded prefix.
+        if ($installerPath !== null && ($mount === null || $mount === '' || ! str_starts_with($requestPath, $mount.'/'))) {
+            return $clean($installerPath);
         }
 
-        $path = preg_replace('~/public/?$~i', '', rtrim($path, '/'));
-
-        return $path === '.' || $path === '/' ? '' : rtrim($path, '/');
+        return $mount ?? $clean($requestPath);
     }
 
     public static function normalize(string $url): string
     {
         $parts = parse_url(trim($url));
-        if (! is_array($parts) || ! in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true)
+        if (filter_var(trim($url), FILTER_VALIDATE_URL) === false || ! is_array($parts) || ! in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true)
             || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])
             || isset($parts['query']) || isset($parts['fragment']) || preg_match('/[\x00-\x20\\\\]/', $url)) {
             throw new InvalidArgumentException('Use an HTTP or HTTPS application URL without credentials, query strings or fragments.');
@@ -47,5 +62,10 @@ class DeploymentUrl
     public static function cookieName(string $url): string
     {
         return 'upi_gateway_'.substr(hash('sha256', self::normalize($url)), 0, 16).'_session';
+    }
+
+    public static function isPrivateRequest(string $relativePath): bool
+    {
+        return (bool) preg_match('~^/(?:\.|deployment-private-check\.txt(?:/|$)|(?:app|bootstrap|config|database|resources|routes|vendor|tests|scripts)(?:/|$)|storage/(?:app|framework|logs)(?:/|$)|docs/.+)~i', rawurldecode($relativePath));
     }
 }

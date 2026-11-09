@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: [ "8.2", "8.3" ]
+        php: [ "8.2", "8.3", "8.4" ]
 
     steps:
       - name: Checkout
@@ -54,6 +54,44 @@ jobs:
       - name: Run tests
         run: php artisan test --stop-on-failure
 
+  hosting:
+    name: Hosting · PHP ${{ matrix.php }} · ${{ matrix.server }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: [ "8.2", "8.3", "8.4" ]
+        server: [ nginx, apache, apache-folder ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, pdo_sqlite, pdo_mysql, curl, bcmath
+          coverage: none
+      - name: Install isolated test server binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx apache2 mysql-client php${{ matrix.php }}-fpm
+      - run: composer install --no-interaction --prefer-dist --optimize-autoloader
+      - name: Install locked browser test dependencies
+        run: |
+          npm ci --prefix tests/Hosting/browser --ignore-scripts --no-audit --no-fund
+          tests/Hosting/browser/node_modules/.bin/playwright install --with-deps chromium
+      - name: Verify real routing, assets, CSRF, storage and private-file protection
+        env:
+          TEST_WEBSERVER: ${{ matrix.server }}
+          TEST_PHP_FPM: /usr/sbin/php-fpm${{ matrix.php }}
+          TEST_PHP_CLI: php
+          TEST_HTTPD: /usr/sbin/apache2
+          TEST_APACHE_MODULES: /usr/lib/apache2/modules
+          TEST_APACHE_MIME: /etc/mime.types
+          TEST_BROWSER_MODULE: tests/Hosting/browser/node_modules/playwright
+          TEST_MYSQL_CONTAINER: '1'
+        run: |
+          python3 tests/Hosting/verify_nginx.py
+          python3 tests/Hosting/verify_mysql_installer.py
+
   test-mysql:
     name: MySQL 8.0 · PHP ${{ matrix.php }} — Concurrency & Feature Tests
     runs-on: ubuntu-latest
@@ -71,7 +109,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: [ "8.2", "8.3" ]
+        php: [ "8.2", "8.3", "8.4" ]
 
     steps:
       - name: Checkout

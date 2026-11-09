@@ -7,6 +7,7 @@ use App\Http\Middleware\RedirectToInstall;
 use App\Http\Middleware\SecurityHeaders;
 use App\Http\Middleware\SetDeploymentBasePath;
 use App\Http\Middleware\TrustConfiguredProxies;
+use App\Support\DeploymentFilesystem;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -14,25 +15,9 @@ use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Session\Middleware\AuthenticateSession;
 
-// ── Safe Runtime Storage Self-Healing ─────────────────────────────────────────
-// Automatically ensures required storage and cache skeletons exist on fresh
-// extractions. Only creates missing directories with safe 0755 permissions.
-$appRoot = dirname(__DIR__);
-$runtimeDirectories = [
-    $appRoot.'/storage/app/public',
-    $appRoot.'/storage/app/private',
-    $appRoot.'/storage/framework/cache/data',
-    $appRoot.'/storage/framework/sessions',
-    $appRoot.'/storage/framework/views',
-    $appRoot.'/storage/logs',
-    $appRoot.'/bootstrap/cache',
-];
-
-foreach ($runtimeDirectories as $runtimeDir) {
-    if (! is_dir($runtimeDir)) {
-        @mkdir($runtimeDir, 0755, true);
-    }
-}
+// Create missing runtime directories without following an external symlink or
+// changing the permissions or contents of an existing directory.
+DeploymentFilesystem::prepare(dirname(__DIR__));
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(

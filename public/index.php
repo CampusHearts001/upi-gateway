@@ -83,16 +83,25 @@ if (! file_exists(__DIR__.'/../vendor/autoload.php')) {
 require_once __DIR__.'/../app/Support/DeploymentUrl.php';
 $deploymentBasePath = DeploymentUrl::basePath($_SERVER);
 $deploymentRequestPath = (string) parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
-if ($deploymentRequestPath === $deploymentBasePath.'/__upi_deployment_check') {
+if (DeploymentUrl::isPrivateRequest(substr($deploymentRequestPath, strlen($deploymentBasePath)))) {
+    http_response_code(404);
+    header('Cache-Control: no-store');
+
+    return;
+}
+if (! is_file(__DIR__.'/../.env') && $deploymentRequestPath === $deploymentBasePath.'/__upi_deployment_check') {
     header('Content-Type: application/json');
     header('Cache-Control: no-store');
-    echo json_encode(['application' => 'upi-gateway', 'routing' => true, 'base_path' => $deploymentBasePath]);
+    echo json_encode(['application' => 'upi-gateway', 'routing' => true, 'runtime' => 'installer', 'base_path' => $deploymentBasePath]);
 
     return;
 }
 
 // ── 3. Uninstalled Application Redirection (Domain Root & Subdirectory) ──────
-if (! is_file(__DIR__.'/../.env') || ! file_exists(__DIR__.'/../storage/installed')) {
+$installerEndpoint = (bool) preg_match('~/install(\.php)?/?$~i', $deploymentRequestPath);
+// With an environment present, Laravel's database/admin installation guard is
+// authoritative. A missing marker must not make an installed merchant lose login.
+if (! is_file(__DIR__.'/../.env') || (! file_exists(__DIR__.'/../storage/installed') && $installerEndpoint)) {
     $uri = $_SERVER['REQUEST_URI'] ?? '/';
     $path = parse_url($uri, PHP_URL_PATH) ?: '/';
 

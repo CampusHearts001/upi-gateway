@@ -149,7 +149,7 @@ class InstallController extends Controller
             return redirect()->route('home');
         }
 
-        return view('install.admin');
+        return view('install.admin', ['diagnostics' => $this->installer->detectEnvironmentDiagnostics(request())]);
     }
 
     public function adminSave(Request $request)
@@ -203,6 +203,6 @@ class InstallController extends Controller
             return redirect()->route('home');
         }
 
-        return view('install.done');
+        return view('install.done', ['diagnostics' => $this->installer->detectEnvironmentDiagnostics($request)]);
     }
 }

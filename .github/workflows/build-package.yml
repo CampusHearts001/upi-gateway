@@ -148,6 +148,8 @@ jobs:
           test -f "${SANDBOX_DIR}/docs/INSTALLATION.md" || { echo "Missing docs/INSTALLATION.md"; exit 1; }
           test -f "${SANDBOX_DIR}/.env.example" || { echo "Missing .env.example"; exit 1; }
 
+          python3 tests/Hosting/check_package.py "${ZIP_FILE}"
+
           echo "Verifying exclusion of forbidden files..."
           test ! -f "${SANDBOX_DIR}/.env" || { echo "Forbidden .env present"; exit 1; }
           test ! -d "${SANDBOX_DIR}/tests" || { echo "Forbidden tests/ present"; exit 1; }
@@ -191,6 +193,8 @@ jobs:
           ARCHIVE_DIR=$(mktemp -d)
           ARCHIVE_ZIP="${ARCHIVE_DIR}/main.zip"
           git archive HEAD --format=zip --prefix=upi-gateway-main/ -o "${ARCHIVE_ZIP}"
+
+          python3 tests/Hosting/check_package.py "${ARCHIVE_ZIP}"
 
           echo "Extracting main branch archive into sandbox..."
           EXTRACT_DIR=$(mktemp -d)
@@ -248,9 +252,55 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+  verify-hosting:
+    name: Package hosting · PHP ${{ matrix.php }} · ${{ matrix.server }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.2", "8.3", "8.4"]
+        server: [nginx, apache, apache-folder]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, pdo_mysql, mbstring, curl, bcmath
+          coverage: none
+      - name: Install isolated server binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx apache2 mysql-client php${{ matrix.php }}-fpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: upi-gateway-main-${{ needs.build.outputs.short_sha }}
+          path: package-hosting
+      - name: Install locked browser test dependencies
+        run: |
+          npm ci --prefix tests/Hosting/browser --ignore-scripts --no-audit --no-fund
+          tests/Hosting/browser/node_modules/.bin/playwright install --with-deps chromium
+      - name: Verify production ZIP and actual source export
+        env:
+          TEST_WEBSERVER: ${{ matrix.server }}
+          TEST_PHP_FPM: /usr/sbin/php-fpm${{ matrix.php }}
+          TEST_PHP_CLI: php
+          TEST_HTTPD: /usr/sbin/apache2
+          TEST_APACHE_MODULES: /usr/lib/apache2/modules
+          TEST_APACHE_MIME: /etc/mime.types
+          TEST_BROWSER_MODULE: tests/Hosting/browser/node_modules/playwright
+          TEST_MYSQL_CONTAINER: '1'
+        run: |
+          git archive HEAD --format=zip --prefix=upi-gateway-main/ -o package-hosting/main.zip
+          python3 tests/Hosting/check_package.py package-hosting/main.zip package-hosting/upi-gateway-production.zip
+          TEST_PACKAGE=package-hosting/main.zip python3 tests/Hosting/verify_nginx.py
+          TEST_PACKAGE=package-hosting/upi-gateway-production.zip python3 tests/Hosting/verify_nginx.py
+          TEST_PACKAGE=package-hosting/main.zip python3 tests/Hosting/verify_mysql_installer.py
+          TEST_PACKAGE=package-hosting/upi-gateway-production.zip python3 tests/Hosting/verify_mysql_installer.py
+
   publish-release:
     name: Publish Rolling Production Release
-    needs: build
+    needs: [build, verify-hosting]
     if: github.ref == 'refs/heads/main' && needs.build.outputs.is_custom_version == 'false'
     runs-on: ubuntu-latest
     permissions:

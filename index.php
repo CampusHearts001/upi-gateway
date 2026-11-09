@@ -30,7 +30,7 @@ if ($publicDir && $parsedPath !== '' && $parsedPath !== '/') {
     $relativePath = '/'.ltrim((string) $relativePath, '/');
 
     // Only inspect requests targeting known public asset folders or root files
-    if (preg_match('~^/(build/|images/|css/|favicon\.ico|robots\.txt|deployment-check\.json)~i', $relativePath)) {
+    if (preg_match('~^/(?:build/|images/|css/|(?:favicon\.ico|robots\.txt|deployment-check\.json)$)~i', $relativePath)) {
         $targetFile = realpath($publicDir.$relativePath);
 
         $allowedExtensions = [
@@ -59,11 +59,14 @@ if ($publicDir && $parsedPath !== '' && $parsedPath !== '/') {
             $targetFile !== false
             && str_starts_with($targetFile, $publicDir.DIRECTORY_SEPARATOR)
             && is_file($targetFile)
+            && ! preg_match('~(?:^|/)\.~', $relativePath)
             && isset($allowedExtensions[$extension])
         ) {
             header('Content-Type: '.$allowedExtensions[$extension]);
             header('X-Content-Type-Options: nosniff');
-            if (str_starts_with($relativePath, '/build/')) {
+            if (in_array($relativePath, ['/build/manifest.json', '/deployment-check.json'], true)) {
+                header('Cache-Control: no-store');
+            } elseif (str_starts_with($relativePath, '/build/')) {
                 header('Cache-Control: public, max-age=31536000, immutable');
             } else {
                 header('Cache-Control: public, max-age=86400');

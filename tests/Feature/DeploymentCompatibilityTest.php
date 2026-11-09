@@ -4,9 +4,11 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use App\Support\DeploymentConfiguration;
+use App\Support\DeploymentFilesystem;
 use App\Support\DeploymentUrl;
 use App\Support\InstallationManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Storage;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -120,11 +122,7 @@ class DeploymentCompatibilityTest extends TestCase
                 $tempRoot.'/bootstrap/cache',
             ];
 
-            foreach ($requiredDirectories as $dir) {
-                if (! is_dir($dir)) {
-                    @mkdir($dir, 0755, true);
-                }
-            }
+            $this->assertSame([], DeploymentFilesystem::prepare($tempRoot));
 
             foreach ($requiredDirectories as $dir) {
                 $this->assertTrue(is_dir($dir), "Directory {$dir} was not created.");
@@ -153,6 +151,23 @@ class DeploymentCompatibilityTest extends TestCase
         }
     }
 
+    public function test_runtime_skeleton_refuses_to_create_directories_through_an_external_symlink(): void
+    {
+        $root = storage_path('framework/testing/symlink-root-'.bin2hex(random_bytes(8)));
+        $outside = $root.'-outside';
+        mkdir($root, 0755, true);
+        mkdir($outside, 0755, true);
+        symlink($outside, $root.'/storage');
+        try {
+            $this->assertNotSame([], DeploymentFilesystem::prepare($root));
+            $this->assertFileDoesNotExist($outside.'/app');
+        } finally {
+            unlink($root.'/storage');
+            File::deleteDirectory($root);
+            File::deleteDirectory($outside);
+        }
+    }
+
     public function test_git_attributes_preserves_storage_dotfiles_in_export(): void
     {
         $attributes = file_get_contents(base_path('.gitattributes'));
@@ -166,5 +181,32 @@ class DeploymentCompatibilityTest extends TestCase
         $this->assertFileExists(base_path('public/build/manifest.json'));
         $this->assertFileExists(base_path('public/deployment-check.json'));
         $this->assertFileExists(base_path('bootstrap/cache/packages.php'));
+    }
+
+    public function test_panel_script_variations_and_extracted_archive_wrapper_preserve_the_real_mount(): void
+    {
+        $cases = [
+            [['SCRIPT_NAME' => '/index.php', 'REQUEST_URI' => '/services/pay/install.php?step=database'], '/services/pay'],
+            [['SCRIPT_NAME' => '/services/pay/public/index.php/orders', 'REQUEST_URI' => '/services/pay/orders'], '/services/pay'],
+            [['SCRIPT_NAME' => '/cgi-bin/php', 'ORIG_SCRIPT_NAME' => '/area/public/index.php', 'REQUEST_URI' => '/area/login'], '/area'],
+            [['SCRIPT_NAME' => '/public/install.php', 'REQUEST_URI' => '/payment/install'], '/payment'],
+            [['SCRIPT_NAME' => '/payment/index.php', 'REQUEST_URI' => '/payment/docs'], '/payment'],
+            [['SCRIPT_NAME' => '/archive-main/public/install.php', 'REQUEST_URI' => '/archive-main/public/install.php'], '/archive-main'],
+        ];
+        foreach ($cases as [$server, $expected]) {
+            $this->assertSame($expected, DeploymentUrl::basePath($server));
+        }
+        $this->assertSame('http://[::1]:8080/payment', app(InstallationManager::class)->detectApplicationUrl(null, [
+            'HTTP_HOST' => '[::1]:8080', 'SCRIPT_NAME' => '/payment/install.php', 'HTTPS' => 'off',
+        ]));
+    }
+
+    public function test_installation_cookie_names_are_distinct_for_parent_and_nested_apps(): void
+    {
+        $root = 'https://example.test';
+        $urls = [$root, $root.'/one', $root.'/one/nested', $root.'/two'];
+        $names = array_map(fn ($url) => DeploymentUrl::cookieName($url), $urls);
+        $this->assertCount(4, array_unique($names));
+        $this->assertSame('/one/nested/', DeploymentUrl::cookiePath($urls[2]));
     }
 }

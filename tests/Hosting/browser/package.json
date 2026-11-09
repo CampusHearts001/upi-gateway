@@ -1,0 +1,7 @@
+{
+  "name": "upi-gateway-hosting-browser-tests",
+  "private": true,
+  "devDependencies": {
+    "playwright": "1.65.0"
+  }
+}

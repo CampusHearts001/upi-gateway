@@ -255,7 +255,7 @@ class InstallationManager
         $subPrefix = $isSubdirectory ? '/'.$subPath : '';
 
         $documentRoot = str_replace('\\', '/', (string) ($server['DOCUMENT_ROOT'] ?? ''));
-        $docRootIsPublic = str_ends_with(rtrim($documentRoot, '/'), '/public');
+        $docRootIsPublic = realpath($documentRoot) !== false && realpath($documentRoot) === realpath(public_path());
 
         $isHttps = $this->isHttps($server);
         $requiresNginxNotice = ($serverType === 'nginx') && ($isSubdirectory || ! $docRootIsPublic);
@@ -272,7 +272,14 @@ class InstallationManager
             'document_root_is_public' => $docRootIsPublic,
             'requires_nginx_rules' => $requiresNginxNotice,
             'nginx_rule_snippet' => trim($nginxSnippet),
+            'apache_rule_snippet' => DeploymentConfiguration::apache($appUrl, public_path()),
             'public_path' => public_path(),
+            'application_path' => base_path(),
+            'php_version' => PHP_VERSION,
+            'php_sapi' => PHP_SAPI,
+            'layout' => $isSubdirectory ? 'Subdirectory' : 'Domain or subdomain (same public-only mapping)',
+            'wrapper_warning' => (bool) preg_match('/-(?:main|master|v?\d[\w.-]*)$/i', basename(base_path())),
+            'rewrite_module' => function_exists('apache_get_modules') ? (in_array('mod_rewrite', apache_get_modules(), true) ? 'PASS' : 'FAIL') : 'NOT CHECKED',
             'php_handler_required' => $requiresNginxNotice,
         ];
     }

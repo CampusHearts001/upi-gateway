@@ -12,6 +12,9 @@ class RedirectToInstall
 
     public function handle(Request $request, Closure $next)
     {
+        if ($request->is('__upi_deployment_check')) {
+            return $next($request);
+        }
         $installerRequest = str_starts_with($request->path(), 'install');
 
         // A clean installation has no `sessions` table yet. Installer pages

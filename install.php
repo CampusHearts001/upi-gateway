@@ -1,5 +1,6 @@
 <?php
 
+use App\Support\DeploymentFilesystem;
 use App\Support\DeploymentUrl;
 use App\Support\InstallationManager;
 use Illuminate\Contracts\Console\Kernel;
@@ -42,6 +43,8 @@ foreach ($runtimeDirectories as $runtimeDir) {
     }
 }
 require_once $baseDir.'/app/Support/DeploymentUrl.php';
+require_once $baseDir.'/app/Support/DeploymentFilesystem.php';
+DeploymentFilesystem::prepare($baseDir);
 $installerBasePath = DeploymentUrl::basePath($_SERVER);
 $installerUrl = $installerBasePath.'/install.php';
 
@@ -322,6 +325,14 @@ if ($method === 'POST') {
 }
 
 // ── 5. Action Handlers ───────────────────────────────────────────────────────
+if ($method === 'POST' && $step === 'deployment-check') {
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    echo json_encode(['session' => ! $error, 'csrf' => ! $error, 'cookie_path' => ini_get('session.cookie_path')]);
+
+    return;
+}
+
 if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_setup_authorized'])) {
     if ($method === 'POST') {
         http_response_code(403);
@@ -538,12 +549,15 @@ $currentUrl = $diagnostics['detected_app_url'];
                 <div class="alert-notice">
                     <strong>Nginx Subdirectory Configuration Notice:</strong><br>
                     Detected web server <strong><?= htmlspecialchars($diagnostics['server_software'], ENT_QUOTES, 'UTF-8') ?></strong> in subdirectory <code><?= htmlspecialchars($diagnostics['subdirectory_path'], ENT_QUOTES, 'UTF-8') ?></code>. Nginx does not process <code>.htaccess</code>. Back up the domain configuration in your panel. Replace the PHP-FPM placeholder below with the socket from the active panel PHP handler, then add these locations to the existing server block. Preserve its root and other website locations. The application cannot apply this server configuration automatically.
+                    <details><summary>Open guided Nginx configuration</summary>
+                    <p>aaPanel: Website → this domain → Config. Back up the existing text. Read the included PHP handler's fastcgi_pass address and enter it below. Add these locations inside the existing server block, replacing only conflicting locations for this prefix. Validate before reload, then select Recheck.</p>
                     <label>PHP-FPM address from the active panel PHP handler <input data-php-handler placeholder="unix:/path/from/your/panel.sock"></label>
                     <button type="button" data-copy-nginx disabled>Copy configuration</button>
                     <pre data-nginx-config><?= htmlspecialchars($diagnostics['nginx_rule_snippet'], ENT_QUOTES, 'UTF-8') ?></pre>
+                    </details>
                 </div>
             <?php } ?>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl])->render() ?>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'diagnostics' => $diagnostics])->render() ?>
             <ul class="req-list">
                 <?php foreach ($requirements as $r) { ?>
                     <li class="req-item">
@@ -607,6 +621,7 @@ $currentUrl = $diagnostics['detected_app_url'];
 
         <?php } elseif ($step === 'admin') { ?>
             <h2>Create Primary Administrator</h2>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'diagnostics' => $diagnostics])->render() ?>
             <p class="subtitle">Set up the master administrator account for dashboard access and API configuration.</p>
             <form method="POST" action="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=admin">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
@@ -626,17 +641,18 @@ $currentUrl = $diagnostics['detected_app_url'];
                     <label>Confirm Password</label>
                     <input type="password" name="password_confirmation" minlength="10" required>
                 </div>
-                <button type="submit" class="btn">Finalize Installation</button>
+                <button data-deployment-submit type="submit" class="btn" disabled>Finalize Installation</button>
             </form>
 
         <?php } elseif ($step === 'done') { ?>
-            <h2>Installation Complete!</h2>
-            <p class="subtitle">The application is fully installed and secured. The installer has been permanently locked.</p>
+            <h2>Database Installation Complete — Final Hosting Verification</h2>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'finalCheck' => true, 'diagnostics' => $diagnostics])->render() ?>
+            <p class="subtitle">The database is installed and the installer is locked. Complete the browser checks before proceeding to login.</p>
             <p style="font-size: 0.9rem; color: #475569; margin-bottom: 0.75rem;"><strong>Required Next Step: Configure cPanel Cron Jobs</strong></p>
             <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 0.5rem;">Add these two jobs in cPanel &rarr; Cron Jobs (running every minute):</p>
             <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan schedule:run &gt;&gt; storage/logs/scheduler.log 2&gt;&amp;1</div>
             <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan queue:work database --queue=default --stop-when-empty --max-time=50 --tries=6 --timeout=60 --memory=128 --sleep=3 &gt;&gt; storage/logs/queue.log 2&gt;&amp;1</div>
-            <a href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Proceed to Merchant Login &rarr;</a>
+            <a data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Proceed to Merchant Login &rarr;</a>
         <?php } ?>
     </div>
 </div>
