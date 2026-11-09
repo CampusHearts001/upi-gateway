@@ -271,7 +271,9 @@ jobs:
       - name: Install isolated server binaries
         run: |
           sudo apt-get update
-          sudo apt-get install -y nginx apache2 mysql-client php${{ matrix.php }}-fpm
+          sudo apt-get install -y nginx apache2 mysql-client
+          test -x "/usr/sbin/php-fpm${{ matrix.php }}"
+          "/usr/sbin/php-fpm${{ matrix.php }}" -v
       - uses: actions/download-artifact@v4
         with:
           name: upi-gateway-main-${{ needs.build.outputs.short_sha }}

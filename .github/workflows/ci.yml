@@ -72,7 +72,9 @@ jobs:
       - name: Install isolated test server binaries
         run: |
           sudo apt-get update
-          sudo apt-get install -y nginx apache2 mysql-client php${{ matrix.php }}-fpm
+          sudo apt-get install -y nginx apache2 mysql-client
+          test -x "/usr/sbin/php-fpm${{ matrix.php }}"
+          "/usr/sbin/php-fpm${{ matrix.php }}" -v
       - run: composer install --no-interaction --prefer-dist --optimize-autoloader
       - name: Install locked browser test dependencies
         run: |
