@@ -4,18 +4,18 @@
     $nativeInstaller = $nativeInstaller ?? false;
 @endphp
 <style nonce="{{ $csp_nonce ?? '' }}">
-    .installer-readiness { text-align: center; padding: 1.25rem 0 1.5rem; }
-    .installer-readiness__icon { width: 4.5rem; height: 4.5rem; margin: 0 auto 1rem; border-radius: 9999px; display: grid; place-items: center; background: #eef2ff; color: #4f46e5; }
+    .installer-readiness { text-align: center; padding: 1.5rem 0 1.25rem; }
+    .installer-readiness__icon { width: 4.75rem; height: 4.75rem; margin: 0 auto 1.125rem; border: 1px solid #c7d2fe; border-radius: 1.35rem; display: grid; place-items: center; background: #f5f7ff; color: #4f46e5; box-shadow: 0 10px 24px rgba(79,70,229,.1); transition: background .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease; }
     .installer-readiness__spinner { width: 2rem; height: 2rem; border: 3px solid #c7d2fe; border-top-color: #4f46e5; border-radius: 9999px; animation: installer-spin .8s linear infinite; }
-    .installer-readiness[data-state="ready"] .installer-readiness__icon { background: #dcfce7; color: #059669; }
-    .installer-readiness[data-state="failed"] .installer-readiness__icon { background: #fee2e2; color: #dc2626; }
+    .installer-readiness[data-state="ready"] .installer-readiness__icon { border-color: #a7f3d0; background: #ecfdf5; color: #059669; box-shadow: 0 10px 24px rgba(5,150,105,.1); }
+    .installer-readiness[data-state="failed"] .installer-readiness__icon { border-color: #fecaca; background: #fef2f2; color: #dc2626; box-shadow: 0 10px 24px rgba(220,38,38,.08); }
     .installer-readiness__symbol { display: none; width: 2.25rem; height: 2.25rem; }
     .installer-readiness[data-state="ready"] .installer-readiness__spinner,
     .installer-readiness[data-state="failed"] .installer-readiness__spinner { display: none; }
     .installer-readiness[data-state="ready"] [data-ready-icon],
     .installer-readiness[data-state="failed"] [data-failed-icon] { display: block; }
-    .installer-readiness__title { margin: 0; color: #0f172a; font-size: 1.25rem; font-weight: 700; }
-    .installer-readiness__message { max-width: 26rem; margin: .5rem auto 0; color: #64748b; font-size: .9rem; line-height: 1.5; }
+    .installer-readiness__title { margin: 0; color: #0f172a; font-size: 1.2rem; font-weight: 750; letter-spacing: -.02em; }
+    .installer-readiness__message { max-width: 27rem; margin: .55rem auto 0; color: #64748b; font-size: .9rem; line-height: 1.6; }
     [data-deployment-continue][hidden], [data-deployment-submit][hidden], [data-hosting-recheck] { display: none !important; }
     @keyframes installer-spin { to { transform: rotate(360deg); } }
 </style>

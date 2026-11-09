@@ -2,14 +2,15 @@
 @php $step = 3; @endphp
 
 @section('content')
-<h1 class="text-2xl font-bold text-slate-900">Run Migrations</h1>
-<p class="mt-1 text-sm text-slate-500">Creating database tables — this may take a few seconds.</p>
+<p class="installer-kicker">Step 3 · Set up</p>
+<h1 class="mt-2 text-2xl font-bold text-slate-950 sm:text-3xl">Prepare the application</h1>
+<p class="mt-2 text-sm leading-6 text-slate-500">We’ll create the required database tables. This usually takes only a few seconds.</p>
 
-<div id="output" class="mt-6 rounded-xl bg-slate-950 p-4 font-mono text-xs text-slate-300 min-h-32 whitespace-pre-wrap">
+<div id="output" class="mt-6 min-h-36 whitespace-pre-wrap rounded-2xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-300 shadow-inner sm:p-5">
     Waiting to start...
 </div>
 
-<div id="error" class="hidden mt-4 rounded-lg bg-red-50 ring-1 ring-red-200 px-4 py-3 text-sm text-red-700"></div>
+<div id="error" class="hidden mt-4 rounded-xl bg-red-50 ring-1 ring-red-200 px-4 py-3.5 text-sm leading-6 text-red-700"></div>
 
 <div class="mt-6 space-y-3">
     <button id="run-btn" class="btn btn-primary w-full justify-center py-2.5">

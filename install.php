@@ -508,39 +508,88 @@ if (! $allPassed) {
     <title>Install · UPI Gateway</title>
     <style>
         * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; padding: 2rem 1rem; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        .wrapper { width: 100%; max-width: 580px; }
-        .logo { display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-bottom: 2rem; }
-        .logo-icon { width: 40px; height: 40px; background: #4f46e5; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; }
-        .logo-title { font-size: 1.35rem; font-weight: 800; color: #0f172a; }
-        .steps { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.75rem; position: relative; }
-        .step-item { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; z-index: 1; }
-        .step-bubble { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: bold; background: #e2e8f0; color: #64748b; }
-        .step-bubble.active { background: #4f46e5; color: white; }
-        .step-bubble.passed { background: #10b981; color: white; }
-        .step-label { font-size: 0.75rem; font-weight: 600; color: #64748b; }
-        .card { background: white; border-radius: 1rem; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05); padding: 2rem; margin-bottom: 1.5rem; }
-        h2 { font-size: 1.25rem; font-weight: 700; margin-top: 0; margin-bottom: 0.5rem; color: #0f172a; }
-        p.subtitle { color: #64748b; font-size: 0.9rem; margin-top: 0; margin-bottom: 1.5rem; line-height: 1.4; }
-        .form-group { margin-bottom: 1.2rem; }
-        label { display: block; font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 0.4rem; }
-        input[type="text"], input[type="email"], input[type="password"], input[type="url"], input[type="number"] { width: 100%; padding: 0.65rem 0.85rem; border: 1px solid #cbd5e1; border-radius: 0.5rem; font-size: 0.95rem; font-family: inherit; }
-        input:focus { outline: none; border-color: #4f46e5; ring: 2px solid #c7d2fe; }
-        .help-text { font-size: 0.75rem; color: #64748b; margin-top: 0.3rem; }
-        .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.85rem; margin-bottom: 1.25rem; }
-        .btn { display: block; width: 100%; text-align: center; padding: 0.75rem 1.25rem; background: #4f46e5; color: white; border: none; border-radius: 0.5rem; font-size: 0.95rem; font-weight: 600; cursor: pointer; text-decoration: none; }
-        .btn:hover { background: #4338ca; }
-        .btn:disabled { background: #94a3b8; cursor: not-allowed; }
+        :root { color-scheme: light; }
+        body { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f3f5f9; color: #0f172a; margin: 0; padding: 2rem; min-height: 100vh; display: grid; place-items: center; -webkit-font-smoothing: antialiased; }
+        body::before { content: ""; position: fixed; inset: 0 0 auto; height: 280px; z-index: -1; background: #0f172a; }
+        .wrapper { width: 100%; max-width: 1040px; }
+        .installer-shell { display: grid; grid-template-columns: 292px minmax(0, 1fr); min-height: 650px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); border-radius: 24px; background: #fff; box-shadow: 0 32px 80px rgba(15,23,42,.22); }
+        .setup-sidebar { display: flex; flex-direction: column; padding: 2rem 1.75rem; color: #cbd5e1; background: #111827; }
+        .logo { display: flex; align-items: center; gap: 0.8rem; padding-bottom: 2rem; border-bottom: 1px solid rgba(255,255,255,.1); }
+        .logo-icon { width: 44px; height: 44px; flex: 0 0 auto; background: #6366f1; border-radius: 13px; display: grid; place-items: center; color: white; font-size: 1.15rem; font-weight: 800; box-shadow: 0 10px 24px rgba(99,102,241,.3); }
+        .logo-title { font-size: 1rem; font-weight: 750; letter-spacing: -.02em; color: #fff; }
+        .logo-subtitle { margin-top: .2rem; color: #94a3b8; font-size: .72rem; font-weight: 500; }
+        .steps { display: flex; flex: 1; flex-direction: column; gap: 0; margin: 2rem 0; }
+        .step-item { position: relative; display: grid; grid-template-columns: 36px 1fr; align-items: center; gap: .8rem; min-height: 68px; }
+        .step-item:not(:last-child)::after { content: ""; position: absolute; top: 50px; bottom: -18px; left: 17px; width: 2px; background: #334155; }
+        .step-item:has(.step-bubble.passed):not(:last-child)::after { background: #10b981; }
+        .step-bubble { position: relative; z-index: 1; width: 36px; height: 36px; border: 1px solid #475569; border-radius: 11px; display: grid; place-items: center; font-size: 0.78rem; font-weight: 700; background: #1e293b; color: #94a3b8; transition: background .18s ease, border-color .18s ease, box-shadow .18s ease; }
+        .step-bubble.active { border-color: #818cf8; background: #6366f1; color: white; box-shadow: 0 0 0 5px rgba(99,102,241,.16); }
+        .step-bubble.passed { border-color: #10b981; background: #10b981; color: white; }
+        .step-bubble.passed::before { content: "✓"; font-size: .9rem; }
+        .step-bubble.passed { font-size: 0; }
+        .step-label { font-size: 0.84rem; font-weight: 600; color: #94a3b8; }
+        .step-item:has(.step-bubble.active) .step-label { color: #fff; }
+        .step-item:has(.step-bubble.passed) .step-label { color: #d1fae5; }
+        .sidebar-note { margin-top: auto; padding: 1rem; border: 1px solid #334155; border-radius: 14px; background: rgba(30,41,59,.72); color: #94a3b8; font-size: .75rem; line-height: 1.55; }
+        .sidebar-note strong { display: block; margin-bottom: .25rem; color: #e2e8f0; font-size: .76rem; }
+        .setup-main { display: flex; min-width: 0; flex-direction: column; padding: 2.5rem 3rem; background: #fff; }
+        .content-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; padding-bottom: 1.25rem; border-bottom: 1px solid #eef2f7; }
+        .content-eyebrow { color: #6366f1; font-size: .7rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+        .content-security { display: inline-flex; align-items: center; gap: .4rem; color: #64748b; font-size: .72rem; font-weight: 600; }
+        .content-security::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #10b981; box-shadow: 0 0 0 3px #d1fae5; }
+        .card { width: 100%; max-width: 590px; margin: auto; padding: 0; }
+        h2 { font-size: 1.75rem; line-height: 1.2; font-weight: 750; letter-spacing: -.035em; margin: 0 0 0.65rem; color: #0f172a; }
+        p.subtitle { color: #64748b; font-size: 0.92rem; margin: 0 0 1.75rem; line-height: 1.65; }
+        .form-group { margin-bottom: 1.15rem; }
+        label { display: block; font-size: 0.8rem; font-weight: 650; color: #334155; margin-bottom: 0.45rem; }
+        input[type="text"], input[type="email"], input[type="password"], input[type="url"], input[type="number"] { width: 100%; min-height: 46px; padding: 0.72rem 0.85rem; border: 1px solid #d7dee8; border-radius: 10px; background: #fff; color: #0f172a; font-size: 0.92rem; font-family: inherit; box-shadow: 0 1px 2px rgba(15,23,42,.03); transition: border-color .15s ease, box-shadow .15s ease; }
+        input:hover { border-color: #a8b3c3; }
+        input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 4px rgba(99,102,241,.11); }
+        input::placeholder { color: #94a3b8; }
+        .help-text { font-size: 0.74rem; color: #64748b; margin-top: 0.4rem; line-height: 1.5; }
+        .alert-error { max-width: 590px; width: 100%; margin: 0 auto 1.25rem; padding: 0.85rem 1rem; border: 1px solid #fecaca; border-left: 4px solid #ef4444; border-radius: 10px; background: #fef2f2; color: #991b1b; font-size: 0.84rem; line-height: 1.5; }
+        .btn { display: block; width: 100%; min-height: 46px; text-align: center; padding: 0.78rem 1.25rem; background: #4f46e5; color: white; border: 1px solid #4f46e5; border-radius: 10px; box-shadow: 0 6px 16px rgba(79,70,229,.18); font-size: 0.9rem; font-weight: 650; font-family: inherit; cursor: pointer; text-decoration: none; transition: transform .15s ease, background .15s ease, box-shadow .15s ease; }
+        .btn:hover { transform: translateY(-1px); background: #4338ca; box-shadow: 0 9px 22px rgba(79,70,229,.23); }
+        .btn:focus-visible { outline: 3px solid rgba(99,102,241,.22); outline-offset: 2px; }
+        .btn:disabled { transform: none; border-color: #94a3b8; background: #94a3b8; box-shadow: none; cursor: not-allowed; }
+        @media (max-width: 760px) {
+            body { display: block; padding: 0; background: #fff; }
+            body::before { display: none; }
+            .wrapper { max-width: none; }
+            .installer-shell { display: block; min-height: 100vh; border: 0; border-radius: 0; box-shadow: none; }
+            .setup-sidebar { padding: 1.25rem 1rem 1rem; }
+            .logo { justify-content: center; padding-bottom: 1.15rem; }
+            .logo-icon { width: 38px; height: 38px; border-radius: 11px; }
+            .steps { flex-direction: row; align-items: flex-start; justify-content: space-between; margin: .9rem auto 0; max-width: 500px; }
+            .step-item { display: flex; min-height: auto; flex-direction: column; gap: .4rem; }
+            .step-item:not(:last-child)::after { top: 17px; bottom: auto; left: calc(50% + 18px); width: calc(100vw / 5 - 36px); height: 2px; }
+            .step-bubble { width: 34px; height: 34px; border-radius: 10px; }
+            .step-label { font-size: .65rem; }
+            .sidebar-note { display: none; }
+            .setup-main { padding: 1.5rem 1.15rem 2rem; }
+            .content-header { margin-bottom: 1.5rem; padding-bottom: 1rem; }
+            .content-security { display: none; }
+            .card { max-width: 560px; }
+            h2 { font-size: 1.5rem; }
+        }
+        @media (max-width: 410px) {
+            .step-label { display: none; }
+            .steps { padding-inline: .25rem; }
+            .step-item:not(:last-child)::after { width: calc(100vw / 5 - 34px); }
+        }
+        @media (prefers-reduced-motion: reduce) { .btn, input, .step-bubble { transition: none; } }
     </style>
 </head>
 <body>
 <div class="wrapper">
+  <div class="installer-shell">
+   <aside class="setup-sidebar">
     <div class="logo">
         <div class="logo-icon">&#x26A1;</div>
-        <div class="logo-title">UPI Gateway Installation</div>
+        <div><div class="logo-title">UPI Gateway</div><div class="logo-subtitle">Installation wizard</div></div>
     </div>
 
-    <div class="steps">
+    <div class="steps" aria-label="Installation progress">
         <div class="step-item">
             <div class="step-bubble <?= $step === 'requirements' ? 'active' : 'passed' ?>">1</div>
             <span class="step-label">Ready</span>
@@ -561,6 +610,15 @@ if (! $allPassed) {
             <div class="step-bubble <?= $step === 'done' ? 'passed' : '' ?>">5</div>
             <span class="step-label">Complete</span>
         </div>
+    </div>
+
+    <div class="sidebar-note"><strong>Secure local setup</strong>Your credentials stay on this server throughout installation.</div>
+   </aside>
+
+   <main class="setup-main">
+    <div class="content-header">
+        <span class="content-eyebrow">Application setup</span>
+        <span class="content-security">Secure installer</span>
     </div>
 
     <?php if ($error) { ?>
@@ -655,6 +713,8 @@ if (! $allPassed) {
             <a hidden data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Go to Login &rarr;</a>
         <?php } ?>
     </div>
+   </main>
+  </div>
 </div>
 </body>
 </html>

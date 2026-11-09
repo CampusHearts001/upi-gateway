@@ -3,8 +3,9 @@
 
 @section('content')
 @include('install.hosting-check', ['deploymentUrl' => config('app.url'), 'serverReady' => $serverReady])
-<h1 class="text-2xl font-bold text-slate-900">Create Admin Account</h1>
-<p class="mt-1 text-sm text-slate-500">This will be your admin login for the dashboard.</p>
+<p class="installer-kicker">Step 4 · Account</p>
+<h1 class="mt-2 text-2xl font-bold text-slate-950 sm:text-3xl">Create your admin account</h1>
+<p class="mt-2 text-sm leading-6 text-slate-500">Use these credentials to securely access and manage your dashboard.</p>
 
 <form method="POST" action="{{ route('install.admin.save') }}" class="mt-6 space-y-5">
     @csrf

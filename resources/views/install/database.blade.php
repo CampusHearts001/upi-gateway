@@ -2,8 +2,9 @@
 @php $step = 2; @endphp
 
 @section('content')
-<h1 class="text-2xl font-bold text-slate-900">Database Setup</h1>
-<p class="mt-1 text-sm text-slate-500">Configure your MySQL database connection.</p>
+<p class="installer-kicker">Step 2 · Database</p>
+<h1 class="mt-2 text-2xl font-bold text-slate-950 sm:text-3xl">Connect your database</h1>
+<p class="mt-2 text-sm leading-6 text-slate-500">Enter the MySQL credentials provided by your hosting provider.</p>
 
 <form method="POST" action="{{ route('install.database.save') }}" class="mt-6 space-y-5">
     @csrf
@@ -20,7 +21,8 @@
     </div>
 
     <input type="hidden" name="db_connection" value="mysql">
-    <div class="rounded-lg bg-slate-50 px-4 py-3 text-sm text-slate-600 ring-1 ring-slate-200">
+    <div class="installer-note flex items-start gap-3 px-4 py-3.5 text-sm leading-6 text-slate-600">
+        <x-icon name="shield" class="mt-0.5 h-4 w-4 shrink-0 text-brand-600" />
         MySQL is required. Enter the credentials for your application database.
     </div>
 
@@ -52,8 +54,8 @@
     </div>
 
     @if ($errors->any())
-        <div class="rounded-lg bg-red-50 ring-1 ring-red-200 px-4 py-3 text-sm text-red-700">
-            {{ $errors->first() }}
+        <div class="flex items-start gap-3 rounded-xl bg-red-50 ring-1 ring-red-200 px-4 py-3.5 text-sm leading-6 text-red-700">
+            <x-icon name="alert" class="mt-0.5 h-4 w-4 shrink-0" /><span>{{ $errors->first() }}</span>
         </div>
     @endif
 
