@@ -62,11 +62,12 @@ class InstallationWizardTest extends TestCase
         $this->get('/')->assertRedirect(route('install.index'));
         $this->get(route('install.index'))
             ->assertOk()
-            ->assertSee('Server Requirements')
-            ->assertSee('PDO MySQL (required)')
+            ->assertSee('Installation readiness')
+            ->assertSee('Checking...')
+            ->assertDontSee('PDO MySQL (required)')
             ->assertDontSee('PDO SQLite')
             ->assertDontSee('Setup Password')
-            ->assertSee('Continue to database setup');
+            ->assertSee('Next');
 
         // Database configuration page is accessible without password
         $this->get(route('install.database'))

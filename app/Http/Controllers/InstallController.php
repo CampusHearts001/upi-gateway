@@ -19,11 +19,26 @@ class InstallController extends Controller
     public function index(Request $request)
     {
         $this->installer->ensureSetupState();
+        $requirements = $this->installer->checkRequirements();
+        $diagnostics = $this->installer->detectEnvironmentDiagnostics($request);
+        $failedChecks = collect($requirements)
+            ->filter(fn (array $check) => ($check['required'] ?? true) && ! $check['pass'])
+            ->pluck('name')
+            ->values()
+            ->all();
+
+        if ($failedChecks !== []) {
+            Log::warning('Installer server readiness checks failed', [
+                'failed_checks' => $failedChecks,
+                'php_sapi' => PHP_SAPI,
+                'server_type' => $diagnostics['server_type'] ?? 'unknown',
+            ]);
+        }
 
         return view('install.index', [
-            'requirements' => $this->installer->checkRequirements(),
-            'allPassed' => $this->installer->allRequirementsPassed(),
-            'diagnostics' => $this->installer->detectEnvironmentDiagnostics($request),
+            'requirements' => $requirements,
+            'allPassed' => $failedChecks === [],
+            'diagnostics' => $diagnostics,
         ]);
     }
 
@@ -149,7 +164,10 @@ class InstallController extends Controller
             return redirect()->route('home');
         }
 
-        return view('install.admin', ['diagnostics' => $this->installer->detectEnvironmentDiagnostics(request())]);
+        return view('install.admin', [
+            'diagnostics' => $this->installer->detectEnvironmentDiagnostics(request()),
+            'serverReady' => $this->installer->allRequirementsPassed(),
+        ]);
     }
 
     public function adminSave(Request $request)
@@ -203,6 +221,9 @@ class InstallController extends Controller
             return redirect()->route('home');
         }
 
-        return view('install.done', ['diagnostics' => $this->installer->detectEnvironmentDiagnostics($request)]);
+        return view('install.done', [
+            'diagnostics' => $this->installer->detectEnvironmentDiagnostics($request),
+            'serverReady' => $this->installer->allRequirementsPassed(),
+        ]);
     }
 }

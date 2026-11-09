@@ -14,11 +14,12 @@ use Illuminate\Support\Facades\Artisan;
 
 // ── 1. Early Safety & PHP Version Checks ─────────────────────────────────────
 if (version_compare(PHP_VERSION, '8.2.0', '<')) {
+    error_log('[UPI Gateway installer] Server readiness check failed: unsupported PHP version '.PHP_VERSION);
     http_response_code(500);
     header('Content-Type: text/html; charset=utf-8');
-    echo '<!DOCTYPE html><html><head><title>PHP Version Error</title></head><body style="font-family:sans-serif;padding:2rem;background:#f8fafc;color:#1e293b;">';
-    echo '<h1 style="color:#e11d48;">PHP 8.2 or Higher Required</h1>';
-    echo '<p>Your server is currently running PHP <strong>'.htmlspecialchars(PHP_VERSION, ENT_QUOTES, 'UTF-8').'</strong>. Please switch to PHP 8.2 or higher in your cPanel MultiPHP Manager or Select PHP Version.</p>';
+    echo '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Installation readiness</title></head><body style="font-family:sans-serif;padding:2rem;background:#f8fafc;color:#0f172a;text-align:center;">';
+    echo '<main style="max-width:30rem;margin:10vh auto;background:white;padding:2rem;border:1px solid #e2e8f0;border-radius:1rem;"><h1>Setup not ready</h1>';
+    echo '<p style="color:#64748b;line-height:1.5;">Your server is not ready for installation. Please contact your hosting administrator.</p></main>';
     echo '</body></html>';
 
     return;
@@ -328,6 +329,18 @@ if ($method === 'POST') {
 if ($method === 'POST' && $step === 'deployment-check') {
     header('Content-Type: application/json');
     header('Cache-Control: no-store');
+    if (! $error && (string) ($_POST['diagnostic_report'] ?? '') === '1') {
+        $stage = preg_match('/^[a-z_]{1,40}$/', (string) ($_POST['stage'] ?? '')) ? (string) $_POST['stage'] : 'unknown';
+        $message = preg_replace('/[\x00-\x1f\x7f]/', ' ', (string) ($_POST['message'] ?? 'Unknown readiness failure'));
+        error_log('[UPI Gateway installer] Browser readiness check failed: '.json_encode([
+            'stage' => $stage,
+            'message' => mb_substr($message, 0, 500),
+            'url_prefix' => $installerBasePath,
+        ], JSON_UNESCAPED_SLASHES));
+        echo json_encode(['logged' => true]);
+
+        return;
+    }
     echo json_encode(['session' => ! $error, 'csrf' => ! $error, 'cookie_path' => ini_get('session.cookie_path')]);
 
     return;
@@ -339,6 +352,17 @@ if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_s
         $error = 'Database setup must be completed before proceeding.';
     } else {
         header('Location: '.$installerUrl.'?step=database');
+
+        return;
+    }
+}
+
+if ($step === 'admin' && ! $installer->databaseIsMigrated()) {
+    if ($method === 'POST') {
+        http_response_code(409);
+        $error = 'Database setup must be completed before creating the administrator.';
+    } else {
+        header('Location: '.$installerUrl.'?step=migrate');
 
         return;
     }
@@ -464,6 +488,16 @@ $requirements = $installer->checkRequirements();
 $allPassed = $installer->allRequirementsPassed();
 $diagnostics = $installer->detectEnvironmentDiagnostics(null, $_SERVER);
 $currentUrl = $diagnostics['detected_app_url'];
+if (! $allPassed) {
+    error_log('[UPI Gateway installer] Server readiness checks failed: '.json_encode([
+        'failed_checks' => array_values(array_map(
+            static fn (array $check): string => $check['name'],
+            array_filter($requirements, static fn (array $check): bool => ($check['required'] ?? true) && ! $check['pass'])
+        )),
+        'php_sapi' => PHP_SAPI,
+        'server_type' => $diagnostics['server_type'] ?? 'unknown',
+    ], JSON_UNESCAPED_SLASHES));
+}
 
 ?>
 <!DOCTYPE html>
@@ -488,23 +522,15 @@ $currentUrl = $diagnostics['detected_app_url'];
         .card { background: white; border-radius: 1rem; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05); padding: 2rem; margin-bottom: 1.5rem; }
         h2 { font-size: 1.25rem; font-weight: 700; margin-top: 0; margin-bottom: 0.5rem; color: #0f172a; }
         p.subtitle { color: #64748b; font-size: 0.9rem; margin-top: 0; margin-bottom: 1.5rem; line-height: 1.4; }
-        .req-list { list-style: none; padding: 0; margin: 0 0 1.5rem 0; border: 1px solid #e2e8f0; border-radius: 0.5rem; overflow: hidden; }
-        .req-item { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
-        .req-item:last-child { border-bottom: none; }
-        .tag-pass { background: #dcfce7; color: #166534; font-size: 0.75rem; font-weight: 700; padding: 0.2rem 0.5rem; border-radius: 4px; }
-        .tag-fail { background: #fee2e2; color: #991b1b; font-size: 0.75rem; font-weight: 700; padding: 0.2rem 0.5rem; border-radius: 4px; }
         .form-group { margin-bottom: 1.2rem; }
         label { display: block; font-size: 0.85rem; font-weight: 600; color: #334155; margin-bottom: 0.4rem; }
         input[type="text"], input[type="email"], input[type="password"], input[type="url"], input[type="number"] { width: 100%; padding: 0.65rem 0.85rem; border: 1px solid #cbd5e1; border-radius: 0.5rem; font-size: 0.95rem; font-family: inherit; }
         input:focus { outline: none; border-color: #4f46e5; ring: 2px solid #c7d2fe; }
         .help-text { font-size: 0.75rem; color: #64748b; margin-top: 0.3rem; }
         .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.85rem; margin-bottom: 1.25rem; }
-        .alert-notice { background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; padding: 0.75rem 1rem; border-radius: 0.5rem; font-size: 0.85rem; margin-bottom: 1.25rem; line-height: 1.4; }
-        .alert-notice pre { background: #0f172a; color: #34d399; font-family: monospace; font-size: 0.75rem; padding: 0.6rem 0.75rem; border-radius: 0.35rem; overflow-x: auto; margin: 0.5rem 0 0; }
         .btn { display: block; width: 100%; text-align: center; padding: 0.75rem 1.25rem; background: #4f46e5; color: white; border: none; border-radius: 0.5rem; font-size: 0.95rem; font-weight: 600; cursor: pointer; text-decoration: none; }
         .btn:hover { background: #4338ca; }
         .btn:disabled { background: #94a3b8; cursor: not-allowed; }
-        .cron-box { background: #0f172a; color: #f8fafc; font-family: monospace; font-size: 0.8rem; padding: 0.75rem 1rem; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 1rem; }
     </style>
 </head>
 <body>
@@ -517,7 +543,7 @@ $currentUrl = $diagnostics['detected_app_url'];
     <div class="steps">
         <div class="step-item">
             <div class="step-bubble <?= $step === 'requirements' ? 'active' : 'passed' ?>">1</div>
-            <span class="step-label">Checks</span>
+            <span class="step-label">Ready</span>
         </div>
         <div class="step-item">
             <div class="step-bubble <?= $step === 'database' ? 'active' : ($step === 'requirements' ? '' : 'passed') ?>">2</div>
@@ -525,11 +551,11 @@ $currentUrl = $diagnostics['detected_app_url'];
         </div>
         <div class="step-item">
             <div class="step-bubble <?= $step === 'migrate' ? 'active' : (in_array($step, ['admin', 'done']) ? 'passed' : '') ?>">3</div>
-            <span class="step-label">Migrate</span>
+            <span class="step-label">Set up</span>
         </div>
         <div class="step-item">
             <div class="step-bubble <?= $step === 'admin' ? 'active' : ($step === 'done' ? 'passed' : '') ?>">4</div>
-            <span class="step-label">Admin</span>
+            <span class="step-label">Account</span>
         </div>
         <div class="step-item">
             <div class="step-bubble <?= $step === 'done' ? 'passed' : '' ?>">5</div>
@@ -543,33 +569,11 @@ $currentUrl = $diagnostics['detected_app_url'];
 
     <div class="card">
         <?php if ($step === 'requirements') { ?>
-            <h2>Server &amp; Extension Checks</h2>
-            <p class="subtitle">Checking your cPanel environment for required PHP modules and writable paths.</p>
-            <?php if (! empty($diagnostics['requires_nginx_rules'])) { ?>
-                <div class="alert-notice">
-                    <strong>Nginx Subdirectory Configuration Notice:</strong><br>
-                    Detected web server <strong><?= htmlspecialchars($diagnostics['server_software'], ENT_QUOTES, 'UTF-8') ?></strong> in subdirectory <code><?= htmlspecialchars($diagnostics['subdirectory_path'], ENT_QUOTES, 'UTF-8') ?></code>. Nginx does not process <code>.htaccess</code>. Back up the domain configuration in your panel. Replace the PHP-FPM placeholder below with the socket from the active panel PHP handler, then add these locations to the existing server block. Preserve its root and other website locations. The application cannot apply this server configuration automatically.
-                    <details><summary>Open guided Nginx configuration</summary>
-                    <p>aaPanel: Website → this domain → Config. Back up the existing text. Read the included PHP handler's fastcgi_pass address and enter it below. Add these locations inside the existing server block, replacing only conflicting locations for this prefix. Validate before reload, then select Recheck.</p>
-                    <label>PHP-FPM address from the active panel PHP handler <input data-php-handler placeholder="unix:/path/from/your/panel.sock"></label>
-                    <button type="button" data-copy-nginx disabled>Copy configuration</button>
-                    <pre data-nginx-config><?= htmlspecialchars($diagnostics['nginx_rule_snippet'], ENT_QUOTES, 'UTF-8') ?></pre>
-                    </details>
-                </div>
-            <?php } ?>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'diagnostics' => $diagnostics])->render() ?>
-            <ul class="req-list">
-                <?php foreach ($requirements as $r) { ?>
-                    <li class="req-item">
-                        <span><?= htmlspecialchars($r['name'], ENT_QUOTES, 'UTF-8') ?></span>
-                        <span class="<?= $r['pass'] ? 'tag-pass' : 'tag-fail' ?>"><?= $r['pass'] ? 'Pass' : 'Missing' ?></span>
-                    </li>
-                <?php } ?>
-            </ul>
+            <h2 style="text-align:center;">Installation readiness</h2>
+            <p class="subtitle" style="text-align:center;">This will only take a moment.</p>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
             <?php if ($allPassed) { ?>
-                <a data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=database" class="btn">Continue to Database Setup &rarr;</a>
-            <?php } else { ?>
-                <button disabled class="btn">Requirements Unmet &mdash; Please enable modules in cPanel</button>
+                <a hidden data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=database" class="btn">Next &rarr;</a>
             <?php } ?>
 
         <?php } elseif ($step === 'database') { ?>
@@ -621,7 +625,7 @@ $currentUrl = $diagnostics['detected_app_url'];
 
         <?php } elseif ($step === 'admin') { ?>
             <h2>Create Primary Administrator</h2>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'diagnostics' => $diagnostics])->render() ?>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
             <p class="subtitle">Set up the master administrator account for dashboard access and API configuration.</p>
             <form method="POST" action="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=admin">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
@@ -641,18 +645,14 @@ $currentUrl = $diagnostics['detected_app_url'];
                     <label>Confirm Password</label>
                     <input type="password" name="password_confirmation" minlength="10" required>
                 </div>
-                <button data-deployment-submit type="submit" class="btn" disabled>Finalize Installation</button>
+                <button hidden data-deployment-submit type="submit" class="btn" disabled>Finalize Installation</button>
             </form>
 
         <?php } elseif ($step === 'done') { ?>
-            <h2>Database Installation Complete — Final Hosting Verification</h2>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'finalCheck' => true, 'diagnostics' => $diagnostics])->render() ?>
-            <p class="subtitle">The database is installed and the installer is locked. Complete the browser checks before proceeding to login.</p>
-            <p style="font-size: 0.9rem; color: #475569; margin-bottom: 0.75rem;"><strong>Required Next Step: Configure cPanel Cron Jobs</strong></p>
-            <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 0.5rem;">Add these two jobs in cPanel &rarr; Cron Jobs (running every minute):</p>
-            <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan schedule:run &gt;&gt; storage/logs/scheduler.log 2&gt;&amp;1</div>
-            <div class="cron-box">* * * * * cd <?= htmlspecialchars($baseDir, ENT_QUOTES, 'UTF-8') ?> &amp;&amp; php artisan queue:work database --queue=default --stop-when-empty --max-time=50 --tries=6 --timeout=60 --memory=128 --sleep=3 &gt;&gt; storage/logs/queue.log 2&gt;&amp;1</div>
-            <a data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Proceed to Merchant Login &rarr;</a>
+            <h2 style="text-align:center;">Installation complete</h2>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'finalCheck' => true, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
+            <p class="subtitle" style="text-align:center;">Your account and database are ready.</p>
+            <a hidden data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Go to Login &rarr;</a>
         <?php } ?>
     </div>
 </div>
