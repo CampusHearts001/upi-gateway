@@ -365,6 +365,7 @@ $error = null;
 $success = null;
 
 $method = $_SERVER['REQUEST_METHOD'] ?? (function_exists('request') ? request()->method() : 'GET');
+$serverState = function_exists('request') && request() ? array_merge($_SERVER, request()->server()) : $_SERVER;
 
 // Validate CSRF token on POST
 if ($method === 'POST') {
@@ -383,6 +384,12 @@ if ($method === 'POST' && $step === 'deployment-check') {
     if ($alreadyInstalled) {
         http_response_code(403);
         echo json_encode(['error' => 'Application is already installed.']);
+
+        return;
+    }
+    if ($error) {
+        http_response_code(403);
+        echo json_encode(['error' => $error, 'session' => false, 'csrf' => false, 'ready' => false]);
 
         return;
     }
@@ -410,8 +417,9 @@ if ($method === 'POST' && $step === 'deployment-check') {
 
         return;
     }
-    $readiness = $installer->verifyServerReadiness($_SERVER);
-    if (! $error && $readiness['ready']) {
+    $readiness = $installer->verifyServerReadiness($serverState);
+    $overview = $installer->getRequirementsOverview([], $serverState);
+    if (! $error && $readiness['ready'] && $overview['allPassed']) {
         $_SESSION['_installer_readiness_passed'] = true;
     } else {
         unset($_SESSION['_installer_readiness_passed']);
@@ -419,17 +427,21 @@ if ($method === 'POST' && $step === 'deployment-check') {
     echo json_encode([
         'session' => ! $error,
         'csrf' => ! $error,
-        'ready' => $readiness['ready'],
+        'ready' => $readiness['ready'] && $overview['allPassed'],
         'php_handler' => $installer->detectPhpHandler(),
         'cookie_path' => ini_get('session.cookie_path'),
+        'requirements' => $overview['requirements'],
+        'summary' => $overview['summary'],
+        'groups' => $overview['groups'],
+        'allPassed' => $overview['allPassed'],
     ]);
 
     return;
 }
 
 if ($step === 'requirements') {
-    $readiness = $installer->verifyServerReadiness($_SERVER);
-    if ($readiness['ready']) {
+    $readiness = $installer->verifyServerReadiness($serverState);
+    if ($readiness['ready'] && $installer->allRequirementsPassed([], $serverState)) {
         $_SESSION['_installer_readiness_passed'] = true;
     } else {
         unset($_SESSION['_installer_readiness_passed']);
@@ -437,11 +449,11 @@ if ($step === 'requirements') {
 }
 
 if (! $error && $step === 'database') {
-    $readiness = $installer->verifyServerReadiness($_SERVER);
-    if (! $readiness['ready']) {
+    $readiness = $installer->verifyServerReadiness($serverState);
+    if (! $readiness['ready'] || ! $installer->allRequirementsPassed([], $serverState)) {
         if ($method === 'POST') {
             http_response_code(403);
-            $error = $readiness['message'];
+            $error = $readiness['ready'] ? 'Resolve all failed requirements before proceeding.' : $readiness['message'];
             $step = 'requirements';
         } else {
             installer_redirect($installerUrl.'?step=requirements');
@@ -595,9 +607,12 @@ if ($method === 'POST' && ! $error) {
 }
 
 // ── 6. Step Views ────────────────────────────────────────────────────────────
-$requirements = $installer->checkRequirements();
-$allPassed = $installer->allRequirementsPassed();
-$diagnostics = $installer->detectEnvironmentDiagnostics(null, $_SERVER);
+$overview = $installer->getRequirementsOverview([], $serverState);
+$requirements = $overview['requirements'];
+$summary = $overview['summary'];
+$groups = $overview['groups'];
+$allPassed = $overview['allPassed'];
+$diagnostics = $installer->detectEnvironmentDiagnostics(null, $serverState);
 $currentUrl = $diagnostics['detected_app_url'];
 if (! $allPassed) {
     error_log('[UPI Gateway installer] Server readiness checks failed: '.json_encode([
@@ -739,11 +754,21 @@ if (! $allPassed) {
     <div class="card">
         <?php if ($step === 'requirements') { ?>
             <h2 style="text-align:center;">Installation readiness</h2>
-            <p class="subtitle" style="text-align:center;">This will only take a moment.</p>
+            <p class="subtitle" style="text-align:center;">Review system requirements and hosting readiness below.</p>
             <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'deploymentDiagnosticToken' => $diagnosticToken, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
-            <?php if ($allPassed) { ?>
-                <a hidden data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=database" class="btn">Next &rarr;</a>
-            <?php } ?>
+            <?= view('install.requirements-overview', [
+                'overview' => $overview,
+                'summary' => $summary,
+                'groups' => $groups,
+                'requirements' => $requirements,
+                'allPassed' => $allPassed,
+                'deploymentUrl' => $currentUrl,
+                'installerUrl' => $installerUrl,
+                'nextUrl' => $installerUrl.'?step=database',
+                'recheckUrl' => $installerUrl.'?step=deployment-check',
+                'csrfToken' => $csrfToken,
+                'nativeInstaller' => true,
+            ])->render() ?>
 
         <?php } elseif (! $error && $step === 'database') { ?>
             <h2>Database Configuration</h2>

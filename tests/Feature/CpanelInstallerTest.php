@@ -466,7 +466,7 @@ class CpanelInstallerTest extends TestCase
         $response->assertSee('Installation readiness');
         $response->assertSee('Checking...');
         $response->assertSee('Next');
-        $response->assertDontSee('PDO MySQL (required)');
+        $response->assertSee('PDO MySQL (required)');
         $response->assertDontSee('PHP-FPM address');
         $response->assertSee('Running Directory to /public');
     }

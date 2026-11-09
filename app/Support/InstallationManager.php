@@ -781,10 +781,12 @@ class InstallationManager
      * Inspect system and directory requirements for browser/cPanel installation.
      *
      * @param  array<string, bool>  $overrides
-     * @return array<int, array{name: string, required: bool, pass: bool}>
+     * @param  array<string, mixed>  $server
+     * @return array<int, array{name: string, category: string, required: bool, pass: bool, status: string, current_value: string, description: string, remediation: string}>
      */
-    public function checkRequirements(array $overrides = []): array
+    public function checkRequirements(array $overrides = [], array $server = []): array
     {
+        $server = ! empty($server) ? $server : ($_SERVER ?? []);
         $storageDir = storage_path();
         $cacheDir = storage_path('framework/cache');
         $sessionsDir = storage_path('framework/sessions');
@@ -793,41 +795,498 @@ class InstallationManager
         $bootstrapCacheDir = base_path('bootstrap/cache');
         $envFile = $this->envPath();
         $envDir = dirname($envFile);
-        $handler = self::detectPhpHandler();
+        $handler = self::detectPhpHandler($server['PHP_SAPI'] ?? PHP_SAPI);
+
+        $disabledFunctions = array_filter(array_map('trim', explode(',', strtolower((string) ini_get('disable_functions')))));
+        $isSessionDisabled = in_array('session_start', $disabledFunctions, true) || in_array('session_status', $disabledFunctions, true);
+        $isRandomDisabled = in_array('random_bytes', $disabledFunctions, true) || in_array('random_int', $disabledFunctions, true);
+        $isHashDisabled = in_array('hash_hmac', $disabledFunctions, true) || in_array('hash_equals', $disabledFunctions, true);
+
+        $memoryLimit = trim((string) ini_get('memory_limit'));
+        $memoryBytes = -1;
+        if ($memoryLimit !== '-1' && $memoryLimit !== '') {
+            $unit = strtolower(substr($memoryLimit, -1));
+            $val = (int) substr($memoryLimit, 0, -1);
+            $memoryBytes = match ($unit) {
+                'g' => $val * 1024 * 1024 * 1024,
+                'm' => $val * 1024 * 1024,
+                'k' => $val * 1024,
+                default => (int) $memoryLimit,
+            };
+        }
+        $memoryOk = $memoryBytes === -1 || $memoryBytes >= 134217728;
+
+        $publicPath = realpath(public_path());
+        $docRootSafe = true;
+        if ($publicPath !== false && (is_file($publicPath.'/.env') || is_file($publicPath.'/composer.json'))) {
+            $docRootSafe = false;
+        }
+
+        $sqliteLoaded = extension_loaded('pdo_sqlite');
+
+        $dirPerms = function (string $path): string {
+            if (! file_exists($path)) {
+                return 'missing';
+            }
+            $p = @fileperms($path);
+
+            return $p !== false ? '0'.substr(sprintf('%o', $p), -3) : 'unknown';
+        };
 
         $checks = [
-            ['name' => 'PHP >= 8.2', 'required' => true, 'pass' => version_compare(PHP_VERSION, '8.2.0', '>=')],
-            ['name' => 'PHP-FPM execution', 'required' => true, 'pass' => $handler['supported']],
-            ['name' => 'PDO Extension', 'required' => true, 'pass' => extension_loaded('pdo')],
-            ['name' => 'PDO MySQL (required)', 'required' => true, 'pass' => extension_loaded('pdo_mysql')],
-            ['name' => 'OpenSSL Extension', 'required' => true, 'pass' => extension_loaded('openssl')],
-            ['name' => 'Mbstring Extension', 'required' => true, 'pass' => extension_loaded('mbstring')],
-            ['name' => 'Tokenizer Extension', 'required' => true, 'pass' => extension_loaded('tokenizer')],
-            ['name' => 'JSON Extension', 'required' => true, 'pass' => extension_loaded('json')],
-            ['name' => 'cURL Extension', 'required' => true, 'pass' => extension_loaded('curl')],
-            ['name' => 'Fileinfo Extension', 'required' => true, 'pass' => extension_loaded('fileinfo')],
-            ['name' => 'XML Extension', 'required' => true, 'pass' => extension_loaded('xml')],
-            ['name' => 'Ctype Extension', 'required' => true, 'pass' => extension_loaded('ctype')],
-            ['name' => 'BCMath Extension', 'required' => true, 'pass' => extension_loaded('bcmath')],
-            ['name' => 'Iconv Extension', 'required' => true, 'pass' => extension_loaded('iconv')],
-            ['name' => 'storage/ writable', 'required' => true, 'pass' => is_dir($storageDir) && is_writable($storageDir)],
-            ['name' => 'storage/framework/cache writable', 'required' => true, 'pass' => is_dir($cacheDir) && is_writable($cacheDir)],
-            ['name' => 'storage/framework/sessions writable', 'required' => true, 'pass' => is_dir($sessionsDir) && is_writable($sessionsDir)],
-            ['name' => 'storage/framework/views writable', 'required' => true, 'pass' => is_dir($viewsDir) && is_writable($viewsDir)],
-            ['name' => 'storage/logs writable', 'required' => true, 'pass' => is_dir($logsDir) && is_writable($logsDir)],
-            ['name' => 'bootstrap/cache/ writable', 'required' => true, 'pass' => is_dir($bootstrapCacheDir) && is_writable($bootstrapCacheDir)],
-            ['name' => '.env writable', 'required' => true, 'pass' => is_writable($envFile) || (! file_exists($envFile) && is_writable($envDir))],
-            ['name' => 'Session Support', 'required' => true, 'pass' => function_exists('session_status')],
-            ['name' => 'Production Assets (Vite build)', 'required' => true, 'pass' => is_file(public_path('build/manifest.json'))],
+            // ── PHP Environment ───────────────────────────────────────────────
+            [
+                'name' => 'PHP >= 8.2',
+                'category' => 'php',
+                'required' => true,
+                'pass' => version_compare(PHP_VERSION, '8.2.0', '>='),
+                'status' => version_compare(PHP_VERSION, '8.2.0', '>=') ? 'PASS' : 'FAILED',
+                'current_value' => 'PHP '.PHP_VERSION,
+                'description' => 'PHP 8.2 or higher is required for modern framework features, typed properties, and security patches.',
+                'remediation' => 'In cPanel, open "Select PHP Version" and switch to PHP 8.2, 8.3, or 8.4.',
+            ],
+            [
+                'name' => 'PHP-FPM execution',
+                'category' => 'php',
+                'required' => true,
+                'pass' => $handler['supported'],
+                'status' => $handler['supported'] ? 'PASS' : ($handler['status'] === 'unsupported' ? 'FAILED' : 'WARNING'),
+                'current_value' => $handler['name'].' ('.($server['PHP_SAPI'] ?? PHP_SAPI).')',
+                'description' => 'A supported web handler such as PHP-FPM, LiteSpeed LSAPI, or FastCGI is required for web request isolation.',
+                'remediation' => 'Ensure your web server (Nginx/Apache/LiteSpeed) is configured to execute PHP through PHP-FPM or LSAPI.',
+            ],
+            [
+                'name' => 'PHP Memory Limit',
+                'category' => 'php',
+                'required' => false,
+                'pass' => $memoryOk,
+                'status' => $memoryOk ? 'PASS' : 'WARNING',
+                'current_value' => $memoryLimit !== '' ? $memoryLimit : 'Not set',
+                'description' => 'At least 128M PHP memory is recommended for running migrations, payment webhooks, and QR rendering.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Options" tab and set memory_limit to 128M or higher.',
+            ],
+
+            // ── PHP Extensions ────────────────────────────────────────────────
+            [
+                'name' => 'OpenSSL Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('openssl'),
+                'status' => extension_loaded('openssl') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('openssl') ? 'Enabled' : 'Missing',
+                'description' => 'Required for secure TLS connections, payload encryption, and API credential generation.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "openssl".',
+            ],
+            [
+                'name' => 'Mbstring Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('mbstring'),
+                'status' => extension_loaded('mbstring') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('mbstring') ? 'Enabled' : 'Missing',
+                'description' => 'Required for multibyte string manipulation in Unicode merchant names and signatures.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "mbstring".',
+            ],
+            [
+                'name' => 'Tokenizer Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('tokenizer'),
+                'status' => extension_loaded('tokenizer') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('tokenizer') ? 'Enabled' : 'Missing',
+                'description' => 'Required by the Blade template compiler and Laravel framework core.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "tokenizer".',
+            ],
+            [
+                'name' => 'JSON Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('json'),
+                'status' => extension_loaded('json') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('json') ? 'Enabled' : 'Missing',
+                'description' => 'Required for parsing and generating payment gateway JSON payloads.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "json".',
+            ],
+            [
+                'name' => 'cURL Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('curl'),
+                'status' => extension_loaded('curl') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('curl') ? 'Enabled' : 'Missing',
+                'description' => 'Required for sending HTTP/HTTPS requests to payment providers and webhooks.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "curl".',
+            ],
+            [
+                'name' => 'Fileinfo Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('fileinfo'),
+                'status' => extension_loaded('fileinfo') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('fileinfo') ? 'Enabled' : 'Missing',
+                'description' => 'Required for MIME-type detection on QR code assets and receipts.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "fileinfo".',
+            ],
+            [
+                'name' => 'XML Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('xml'),
+                'status' => extension_loaded('xml') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('xml') ? 'Enabled' : 'Missing',
+                'description' => 'Required for XML document parsing in banking APIs and SVG generation.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "xml" (dom/xmlwriter).',
+            ],
+            [
+                'name' => 'Ctype Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('ctype'),
+                'status' => extension_loaded('ctype') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('ctype') ? 'Enabled' : 'Missing',
+                'description' => 'Required for character classification and input validation.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "ctype".',
+            ],
+            [
+                'name' => 'BCMath Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('bcmath'),
+                'status' => extension_loaded('bcmath') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('bcmath') ? 'Enabled' : 'Missing',
+                'description' => 'Required for high-precision currency and decimal arithmetic.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "bcmath".',
+            ],
+            [
+                'name' => 'Iconv Extension',
+                'category' => 'extensions',
+                'required' => true,
+                'pass' => extension_loaded('iconv'),
+                'status' => extension_loaded('iconv') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('iconv') ? 'Enabled' : 'Missing',
+                'description' => 'Required for character set conversion in payment strings and receipts.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "iconv".',
+            ],
+
+            // ── Database Support ──────────────────────────────────────────────
+            [
+                'name' => 'PDO Extension',
+                'category' => 'database',
+                'required' => true,
+                'pass' => extension_loaded('pdo'),
+                'status' => extension_loaded('pdo') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('pdo') ? 'Enabled' : 'Missing',
+                'description' => 'Required PHP Data Objects database abstraction layer.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "pdo".',
+            ],
+            [
+                'name' => 'PDO MySQL (required)',
+                'category' => 'database',
+                'required' => true,
+                'pass' => extension_loaded('pdo_mysql'),
+                'status' => extension_loaded('pdo_mysql') ? 'PASS' : 'MISSING',
+                'current_value' => extension_loaded('pdo_mysql') ? 'Enabled' : 'Missing',
+                'description' => 'Primary database driver for production order and transaction storage.',
+                'remediation' => 'In cPanel, open "Select PHP Version" -> "Extensions" tab and enable "pdo_mysql".',
+            ],
+            [
+                'name' => 'PDO SQLite (optional)',
+                'category' => 'database',
+                'required' => false,
+                'pass' => $sqliteLoaded,
+                'status' => $sqliteLoaded ? 'PASS' : 'OPTIONAL',
+                'current_value' => $sqliteLoaded ? 'Enabled' : 'Not loaded',
+                'description' => 'Optional database driver for lightweight testing and disposable fixtures.',
+                'remediation' => 'In cPanel, enable "pdo_sqlite" if SQLite testing is desired. Not required for MySQL production.',
+            ],
+            [
+                'name' => 'Database Connectivity Prerequisites',
+                'category' => 'database',
+                'required' => true,
+                'pass' => extension_loaded('pdo') && extension_loaded('pdo_mysql'),
+                'status' => (extension_loaded('pdo') && extension_loaded('pdo_mysql')) ? 'PASS' : 'FAILED',
+                'current_value' => (extension_loaded('pdo') && extension_loaded('pdo_mysql')) ? 'Ready for MySQL 5.7+ / 8.0+' : 'PDO MySQL missing',
+                'description' => 'MySQL database connectivity requires both PDO and the MySQL PDO driver.',
+                'remediation' => 'Create a database in cPanel "MySQL Databases" and enable the pdo_mysql extension.',
+            ],
+
+            // ── Filesystem Permissions ────────────────────────────────────────
+            [
+                'name' => 'storage/ writable',
+                'category' => 'permissions',
+                'required' => true,
+                'pass' => is_dir($storageDir) && is_writable($storageDir),
+                'status' => (is_dir($storageDir) && is_writable($storageDir)) ? 'PASS' : 'FAILED',
+                'current_value' => is_dir($storageDir) ? (is_writable($storageDir) ? 'Writable ('.$dirPerms($storageDir).')' : 'Not writable ('.$dirPerms($storageDir).')') : 'Missing directory',
+                'description' => 'Main storage directory for runtime application data, logs, and uploads.',
+                'remediation' => 'In cPanel File Manager or via SSH, set storage/ directory permissions to 775 or 755.',
+            ],
+            [
+                'name' => 'storage/framework/cache writable',
+                'category' => 'permissions',
+                'required' => true,
+                'pass' => is_dir($cacheDir) && is_writable($cacheDir),
+                'status' => (is_dir($cacheDir) && is_writable($cacheDir)) ? 'PASS' : 'FAILED',
+                'current_value' => is_dir($cacheDir) ? (is_writable($cacheDir) ? 'Writable ('.$dirPerms($cacheDir).')' : 'Not writable ('.$dirPerms($cacheDir).')') : 'Missing directory',
+                'description' => 'Holds framework data cache and temporary rate limiter state.',
+                'remediation' => 'Ensure storage/framework/cache exists and permissions are 775 or 755.',
+            ],
+            [
+                'name' => 'storage/framework/sessions writable',
+                'category' => 'permissions',
+                'required' => true,
+                'pass' => is_dir($sessionsDir) && is_writable($sessionsDir),
+                'status' => (is_dir($sessionsDir) && is_writable($sessionsDir)) ? 'PASS' : 'FAILED',
+                'current_value' => is_dir($sessionsDir) ? (is_writable($sessionsDir) ? 'Writable ('.$dirPerms($sessionsDir).')' : 'Not writable ('.$dirPerms($sessionsDir).')') : 'Missing directory',
+                'description' => 'Stores user login sessions and CSRF verification state.',
+                'remediation' => 'Ensure storage/framework/sessions exists and permissions are 775 or 755.',
+            ],
+            [
+                'name' => 'storage/framework/views writable',
+                'category' => 'permissions',
+                'required' => true,
+                'pass' => is_dir($viewsDir) && is_writable($viewsDir),
+                'status' => (is_dir($viewsDir) && is_writable($viewsDir)) ? 'PASS' : 'FAILED',
+                'current_value' => is_dir($viewsDir) ? (is_writable($viewsDir) ? 'Writable ('.$dirPerms($viewsDir).')' : 'Not writable ('.$dirPerms($viewsDir).')') : 'Missing directory',
+                'description' => 'Stores compiled Blade templates for fast page rendering.',
+                'remediation' => 'Ensure storage/framework/views exists and permissions are 775 or 755.',
+            ],
+            [
+                'name' => 'storage/logs writable',
+                'category' => 'permissions',
+                'required' => true,
+                'pass' => is_dir($logsDir) && is_writable($logsDir),
+                'status' => (is_dir($logsDir) && is_writable($logsDir)) ? 'PASS' : 'FAILED',
+                'current_value' => is_dir($logsDir) ? (is_writable($logsDir) ? 'Writable ('.$dirPerms($logsDir).')' : 'Not writable ('.$dirPerms($logsDir).')') : 'Missing directory',
+                'description' => 'Required for writing payment logs, debug traces, and system error logs.',
+                'remediation' => 'Ensure storage/logs exists and permissions are 775 or 755.',
+            ],
+            [
+                'name' => 'bootstrap/cache/ writable',
+                'category' => 'permissions',
+                'required' => true,
+                'pass' => is_dir($bootstrapCacheDir) && is_writable($bootstrapCacheDir),
+                'status' => (is_dir($bootstrapCacheDir) && is_writable($bootstrapCacheDir)) ? 'PASS' : 'FAILED',
+                'current_value' => is_dir($bootstrapCacheDir) ? (is_writable($bootstrapCacheDir) ? 'Writable ('.$dirPerms($bootstrapCacheDir).')' : 'Not writable ('.$dirPerms($bootstrapCacheDir).')') : 'Missing directory',
+                'description' => 'Holds framework package manifest and service provider caches.',
+                'remediation' => 'In cPanel File Manager, set bootstrap/cache/ permissions to 775 or 755.',
+            ],
+            [
+                'name' => '.env writable',
+                'category' => 'permissions',
+                'required' => true,
+                'pass' => is_writable($envFile) || (! file_exists($envFile) && is_writable($envDir)),
+                'status' => (is_writable($envFile) || (! file_exists($envFile) && is_writable($envDir))) ? 'PASS' : 'FAILED',
+                'current_value' => file_exists($envFile) ? (is_writable($envFile) ? 'Writable ('.$dirPerms($envFile).')' : 'Not writable ('.$dirPerms($envFile).')') : (is_writable($envDir) ? 'Directory writable ('.$dirPerms($envDir).')' : 'Directory read-only ('.$dirPerms($envDir).')'),
+                'description' => 'The installer writes database credentials and environment configuration to .env.',
+                'remediation' => file_exists($envFile)
+                    ? 'In cPanel File Manager or via SSH, set .env file permissions to 660 or 644 (or make it writable).'
+                    : 'The .env file does not exist yet. Ensure the project root directory is writable (775 or 755) so the installer can create .env.',
+            ],
+
+            // ── Hosting & Security ────────────────────────────────────────────
+            [
+                'name' => 'Session Support',
+                'category' => 'security',
+                'required' => true,
+                'pass' => function_exists('session_status') && ! $isSessionDisabled,
+                'status' => (function_exists('session_status') && ! $isSessionDisabled) ? 'PASS' : ($isSessionDisabled ? 'DISABLED' : 'FAILED'),
+                'current_value' => (function_exists('session_status') && ! $isSessionDisabled) ? 'Enabled' : ($isSessionDisabled ? 'Disabled in php.ini' : 'Unavailable'),
+                'description' => 'Native PHP session handling is required for login sessions and CSRF token verification.',
+                'remediation' => 'Ensure session_start and session_status are not listed in disable_functions in php.ini.',
+            ],
+            [
+                'name' => 'Cryptographic Randomness',
+                'category' => 'security',
+                'required' => true,
+                'pass' => function_exists('random_bytes') && function_exists('random_int') && ! $isRandomDisabled,
+                'status' => (function_exists('random_bytes') && function_exists('random_int') && ! $isRandomDisabled) ? 'PASS' : ($isRandomDisabled ? 'DISABLED' : 'FAILED'),
+                'current_value' => (function_exists('random_bytes') && function_exists('random_int') && ! $isRandomDisabled) ? 'Available' : ($isRandomDisabled ? 'Disabled in php.ini' : 'Unavailable'),
+                'description' => 'Cryptographically secure pseudorandom number generator required for API keys and setup tokens.',
+                'remediation' => 'Ensure random_bytes() and random_int() are not listed in disable_functions in php.ini.',
+            ],
+            [
+                'name' => 'Hash & HMAC Functions',
+                'category' => 'security',
+                'required' => true,
+                'pass' => function_exists('hash_hmac') && function_exists('hash_equals') && ! $isHashDisabled,
+                'status' => (function_exists('hash_hmac') && function_exists('hash_equals') && ! $isHashDisabled) ? 'PASS' : ($isHashDisabled ? 'DISABLED' : 'FAILED'),
+                'current_value' => (function_exists('hash_hmac') && function_exists('hash_equals') && ! $isHashDisabled) ? 'Available' : ($isHashDisabled ? 'Disabled in php.ini' : 'Unavailable'),
+                'description' => 'Required for timing-safe signature comparison in UPI payment webhooks.',
+                'remediation' => 'Ensure hash_hmac and hash_equals are available and not listed in disable_functions.',
+            ],
+            [
+                'name' => 'Document Root & Private File Protection',
+                'category' => 'security',
+                'required' => true,
+                'pass' => $docRootSafe,
+                'status' => $docRootSafe ? 'PASS' : 'FAILED',
+                'current_value' => $docRootSafe ? 'Protected' : 'Private files exposed',
+                'description' => 'Application private files (.env, composer.json) must never be accessible in the web root.',
+                'remediation' => 'In your hosting control panel, set the website Running Directory to /public.',
+            ],
+            [
+                'name' => 'Production Assets (Vite build)',
+                'category' => 'security',
+                'required' => true,
+                'pass' => is_file(public_path('build/manifest.json')) || is_file(public_path('build/.vite/manifest.json')),
+                'status' => (is_file(public_path('build/manifest.json')) || is_file(public_path('build/.vite/manifest.json'))) ? 'PASS' : 'MISSING',
+                'current_value' => (is_file(public_path('build/manifest.json')) || is_file(public_path('build/.vite/manifest.json'))) ? 'Compiled' : 'Manifest missing',
+                'description' => 'Compiled production CSS and JavaScript assets required for wizard interactivity.',
+                'remediation' => 'Ensure all package files from the release ZIP were extracted completely.',
+            ],
         ];
 
         foreach ($checks as &$check) {
             if (array_key_exists($check['name'], $overrides)) {
-                $check['pass'] = (bool) $overrides[$check['name']];
+                $overrideVal = $overrides[$check['name']];
+                if (is_string($overrideVal)) {
+                    $check['status'] = strtoupper($overrideVal);
+                    $check['pass'] = in_array($check['status'], ['PASS', 'OPTIONAL'], true);
+                    $check['current_value'] = match ($check['status']) {
+                        'MISSING' => 'Not installed / Missing',
+                        'DISABLED' => 'Disabled in php.ini',
+                        'FAILED' => 'Failed check (0555)',
+                        'WARNING' => 'Warning',
+                        'OPTIONAL' => 'Not loaded (optional)',
+                        default => 'Passed',
+                    };
+                } else {
+                    $check['pass'] = (bool) $overrideVal;
+                    if (! $check['pass']) {
+                        if ($check['required']) {
+                            $check['status'] = match ($check['category']) {
+                                'extensions' => 'MISSING',
+                                'database' => ($check['name'] === 'PDO MySQL (required)' ? 'MISSING' : 'FAILED'),
+                                'security' => ($check['status'] === 'DISABLED' ? 'DISABLED' : 'FAILED'),
+                                default => 'FAILED',
+                            };
+                            $check['current_value'] = match ($check['status']) {
+                                'MISSING' => 'Not installed / Missing',
+                                'DISABLED' => 'Disabled in php.ini',
+                                default => 'Not writable (0555)',
+                            };
+                        } else {
+                            $check['status'] = $check['category'] === 'database' ? 'OPTIONAL' : 'WARNING';
+                            $check['current_value'] = $check['status'] === 'OPTIONAL' ? 'Not loaded (optional)' : 'Warning';
+                        }
+                    } else {
+                        $check['status'] = 'PASS';
+                    }
+                }
             }
         }
 
         return $checks;
+    }
+
+    /**
+     * Compute statistics for requirement checks.
+     *
+     * @param  array<int, array{name: string, required: bool, pass: bool, status: string}>  $requirements
+     * @return array{total: int, passed: int, failed: int, warnings: int, optional: int, ready: bool}
+     */
+    public function getRequirementsSummary(array $requirements = []): array
+    {
+        $requirements = ! empty($requirements) ? $requirements : $this->checkRequirements();
+        $total = count($requirements);
+        $passed = 0;
+        $failed = 0;
+        $warnings = 0;
+        $optional = 0;
+        $mandatoryFailed = 0;
+
+        foreach ($requirements as $check) {
+            if ($check['pass']) {
+                $passed++;
+            } elseif (! empty($check['required'])) {
+                $failed++;
+                $mandatoryFailed++;
+            } elseif (($check['status'] ?? '') === 'OPTIONAL') {
+                $optional++;
+            } else {
+                $warnings++;
+            }
+        }
+
+        return [
+            'total' => $total,
+            'passed' => $passed,
+            'failed' => $failed,
+            'warnings' => $warnings,
+            'optional' => $optional,
+            'ready' => $mandatoryFailed === 0,
+        ];
+    }
+
+    /**
+     * Group requirement checks into categorized sections.
+     *
+     * @param  array<int, array{name: string, category: string, required: bool, pass: bool}>  $requirements
+     * @return array<string, array{title: string, description: string, checks: array}>
+     */
+    public function getGroupedRequirements(array $requirements = []): array
+    {
+        $requirements = ! empty($requirements) ? $requirements : $this->checkRequirements();
+        $groups = [
+            'php' => [
+                'title' => 'PHP Environment',
+                'description' => 'Core PHP runtime version, execution mode, and configuration.',
+                'checks' => [],
+            ],
+            'extensions' => [
+                'title' => 'PHP Extensions',
+                'description' => 'Mandatory PHP modules for cryptographic security, strings, and APIs.',
+                'checks' => [],
+            ],
+            'database' => [
+                'title' => 'Database Support',
+                'description' => 'Database abstraction layer and PDO drivers for transaction persistence.',
+                'checks' => [],
+            ],
+            'permissions' => [
+                'title' => 'Filesystem Permissions',
+                'description' => 'Writable directories for storage, sessions, compiled views, and logs.',
+                'checks' => [],
+            ],
+            'security' => [
+                'title' => 'Hosting & Security',
+                'description' => 'Web server document root isolation, CSPRNG randomness, and session support.',
+                'checks' => [],
+            ],
+        ];
+
+        foreach ($requirements as $check) {
+            $cat = $check['category'] ?? 'php';
+            if (isset($groups[$cat])) {
+                $groups[$cat]['checks'][] = $check;
+            } else {
+                $groups['php']['checks'][] = $check;
+            }
+        }
+
+        return $groups;
+    }
+
+    /**
+     * Get complete requirement checks with summary and grouping.
+     *
+     * @param  array<string, bool>  $overrides
+     * @param  array<string, mixed>  $server
+     * @return array{requirements: array, summary: array, groups: array, allPassed: bool}
+     */
+    public function getRequirementsOverview(array $overrides = [], array $server = []): array
+    {
+        $requirements = $this->checkRequirements($overrides, $server);
+        $summary = $this->getRequirementsSummary($requirements);
+        $groups = $this->getGroupedRequirements($requirements);
+
+        return [
+            'requirements' => $requirements,
+            'summary' => $summary,
+            'groups' => $groups,
+            'allPassed' => $summary['ready'],
+        ];
     }
 
     public function validateDatabaseConfig(array $data): ?string
@@ -873,10 +1332,11 @@ class InstallationManager
 
     /**
      * @param  array<string, bool>  $overrides
+     * @param  array<string, mixed>  $server
      */
-    public function allRequirementsPassed(array $overrides = []): bool
+    public function allRequirementsPassed(array $overrides = [], array $server = []): bool
     {
-        foreach ($this->checkRequirements($overrides) as $check) {
+        foreach ($this->checkRequirements($overrides, $server) as $check) {
             if (($check['required'] ?? true) && ! $check['pass']) {
                 return false;
             }

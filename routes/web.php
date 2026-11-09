@@ -94,6 +94,7 @@ Route::any('/install.php', function () {
 
 Route::middleware(RedirectIfInstalled::class)->prefix('install')->name('install.')->group(function () {
     Route::get('/', [InstallController::class, 'index'])->name('index');
+    Route::post('/recheck', [InstallController::class, 'recheck'])->name('recheck');
     Route::get('/database', [InstallController::class, 'database'])->name('database');
     Route::post('/database', [InstallController::class, 'databaseSave'])->name('database.save');
     Route::get('/migrate', [InstallController::class, 'migrate'])->name('migrate');

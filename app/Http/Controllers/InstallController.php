@@ -32,7 +32,8 @@ class InstallController extends Controller
             $request->session()->put('installer.diagnostic_token', bin2hex(random_bytes(16)));
         }
 
-        $requirements = $this->installer->checkRequirements();
+        $overview = $this->installer->getRequirementsOverview([], $request->server());
+        $requirements = $overview['requirements'];
         $diagnostics = $this->installer->detectEnvironmentDiagnostics($request);
         $failedChecks = collect($requirements)
             ->filter(fn (array $check) => ($check['required'] ?? true) && ! $check['pass'])
@@ -49,16 +50,36 @@ class InstallController extends Controller
         }
 
         return view('install.index', [
+            'overview' => $overview,
             'requirements' => $requirements,
-            'allPassed' => $failedChecks === [],
+            'summary' => $overview['summary'],
+            'groups' => $overview['groups'],
+            'allPassed' => $overview['allPassed'],
             'diagnostics' => $diagnostics,
         ]);
+    }
+
+    public function recheck(Request $request)
+    {
+        $submittedToken = $request->input('_token') ?? $request->header('X-CSRF-TOKEN');
+        if (! is_string($submittedToken) || ! hash_equals((string) $request->session()->token(), $submittedToken)) {
+            abort(403, 'Security session expired. Please refresh the page and try again.');
+        }
+
+        $overview = $this->installer->getRequirementsOverview([], $request->server());
+
+        return response()->json([
+            'ready' => $overview['allPassed'],
+            'summary' => $overview['summary'],
+            'groups' => $overview['groups'],
+            'requirements' => $overview['requirements'],
+        ])->header('Cache-Control', 'no-store, private');
     }
 
     public function database(Request $request)
     {
         $readiness = $this->installer->verifyServerReadiness($request->server());
-        if (! $readiness['ready']) {
+        if (! $readiness['ready'] || ! $this->installer->allRequirementsPassed([], $request->server())) {
             return redirect()->route('install.index');
         }
 
@@ -79,9 +100,9 @@ class InstallController extends Controller
     public function databaseSave(Request $request)
     {
         $readiness = $this->installer->verifyServerReadiness($request->server());
-        if (! $readiness['ready']) {
+        if (! $readiness['ready'] || ! $this->installer->allRequirementsPassed([], $request->server())) {
             return redirect()->route('install.index')
-                ->withErrors(['server_readiness' => $readiness['message']]);
+                ->withErrors(['server_readiness' => $readiness['ready'] ? 'Resolve all failed requirements before proceeding.' : $readiness['message']]);
         }
 
         $setupToken = $request->input('setup_token') ?? $request->session()->get('installer.setup_token');

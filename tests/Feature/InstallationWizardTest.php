@@ -64,8 +64,8 @@ class InstallationWizardTest extends TestCase
             ->assertOk()
             ->assertSee('Readiness')
             ->assertSee('Checking...')
-            ->assertDontSee('PDO MySQL (required)')
-            ->assertDontSee('PDO SQLite')
+            ->assertSee('PDO MySQL (required)')
+            ->assertSee('PDO SQLite')
             ->assertDontSee('Setup Password')
             ->assertSee('Next');
 
