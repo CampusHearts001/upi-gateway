@@ -23,45 +23,79 @@
 
 ---
 
-## 🚀 One-Click Hosting Installation (cPanel / aaPanel / VPS)
+## 🚀 Quick Installation
 
-You can download and deploy UPI Gateway using either of two 1-click methods. Both packages are fully self-contained and pre-bundled with production `vendor/` dependencies and compiled frontend assets in `public/build/`. **No SSH, Composer, Node.js, or terminal commands are required on your hosting server.**
+UPI Gateway includes a browser-based installer. For a hosting-server installation, use the prepared production package: it includes the production `vendor/` dependencies and compiled frontend assets, so **SSH, Composer, Node.js, and npm are not required on the hosting server**.
 
-| Distribution Option | Direct Download Link | Integrity / Verification | Build Status |
-| :--- | :--- | :--- | :--- |
-| **Option A: GitHub Direct ZIP (Recommended for Beginners)** | [⬇️ **Download `main.zip`**](https://github.com/mynkdev-21/upi-gateway/archive/refs/heads/main.zip) | Click **Code → Download ZIP** or direct link. Pre-bundled runtime package straight from `main`. | [![Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml/badge.svg?branch=main)](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml) |
-| **Option B: Standalone Release Package** | [⬇️ **Download `upi-gateway-production.zip`**](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip) | Rolling production package with verified [SHA-256 Checksum](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip.sha256). | [![Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml/badge.svg?branch=main)](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml) |
+### 1. Download the production package
 
-### 3-Step Hosting Setup:
-1. **Download**: Choose either **Option A (`main.zip`)** or **Option B (`upi-gateway-production.zip`)** from the table above.
-2. **Upload & Extract**: In your hosting File Manager (cPanel or aaPanel), upload and extract the ZIP directly into your website directory.
-3. **Install**: Set your domain's Document Root / Running Directory to `public/` and open `https://yourdomain.com/` in your browser. The web wizard will open automatically. *(Note for aaPanel/Nginx users: Setting Running Directory to `/public` is mandatory for security to prevent direct HTTP access to `.env` and application files; see the [Hosting Guide](docs/CPANEL.md).)*
+| Package | Download |
+|---|---|
+| **Recommended — Production ZIP** | [Download `upi-gateway-production.zip`](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip) |
+| GitHub source archive | [Download `main.zip`](https://github.com/mynkdev-21/upi-gateway/archive/refs/heads/main.zip) |
 
-> [!TIP]
-> **Zero Build Requirements**: Both the native GitHub **Code → Download ZIP** and the **Release ZIP** include all required production PHP dependencies (`vendor/`) and compiled frontend assets (`public/build/`). Development files, test suites, and internal scripts are automatically excluded via `.gitattributes`. You can upload and install immediately without terminal access.
+The production ZIP is the preferred choice for installation. You can verify it with the accompanying [SHA-256 checksum](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip.sha256).
+
+### 2. Prepare your hosting
+
+- Use PHP 8.2 or newer and enable the required PHP extensions listed in the [Installation Guide](docs/INSTALLATION.md).
+- Create a **MySQL** database and database user, and grant that user the required privileges.
+- Enable HTTPS.
+- Extract the application files outside the public web root where your hosting setup allows it.
+- Set the website's **Document Root / Running Directory** to the application's `public/` directory. The public web root must expose only this directory—not the Laravel project root.
+
+**Important:** Main-domain, subdomain, and subdirectory deployments depend on what your hosting panel and web server support. For cPanel, aaPanel/Nginx, and subdirectory-specific instructions, follow the relevant deployment guide before changing the document root or web-server configuration. Do not replace an existing site's Nginx/Apache configuration blindly.
+
+### 3. Run the browser installer
+
+Open your website over HTTPS and visit:
+
+```text
+https://yourdomain.com/install
+```
+
+Follow the wizard:
+
+1. **Requirements check** — resolve any failed PHP, extension, permission, or hosting checks.
+2. **Database setup** — enter the MySQL database details and test the connection.
+3. **Migrations** — let the installer create the application tables.
+4. **Admin account** — create your administrator login.
+
+After installation, sign in to the admin dashboard. The installer is locked after successful setup; do not bypass or remove the installation protection.
+
+### Installation guides
+
+| Guide | What it covers |
+|---|---|
+| [Installation Wizard](docs/INSTALLATION.md) | Requirements, installer screens, database setup, and troubleshooting |
+| [cPanel](docs/CPANEL.md) | Shared hosting, database creation, file placement, cron jobs, and production package |
+| [Ubuntu VPS](docs/VPS.md) | Ubuntu, Nginx, PHP-FPM, MySQL, SSL, queue worker, and scheduler |
+
+> [!WARNING]
+> Do not accept live payments until you have checked the production security checklist, configured queue/scheduler tasks, and completed your own payment-provider and hosting tests. Local automated tests do not prove compatibility with every hosting provider or UPI app.
+
+### Free installation support
+
+Need help? We provide free installation guidance for UPI Gateway users.
+
+- **[WhatsApp Installation Support](https://wa.me/916388401024)**
+- **[Open a GitHub issue](https://github.com/mynkdev-21/upi-gateway/issues)**
+
+When asking for help, share your hosting provider, PHP version, deployment type (main domain, subdomain, or subdirectory), and a screenshot of the error.
+
+**Never share hosting/SSH passwords, database passwords, API secrets, or your `.env` file.**
 
 ---
 
-> [!IMPORTANT]
-> **Stable Release Candidate — November 2026**
->
-> The stable-release candidate has been pushed to the `main` branch. It includes the browser-based installer, MySQL production support, payment verification integrations, timestamped webhook signatures, and cPanel/VPS deployment guides.
->
-> **External verification is still pending:** installation on a real cPanel shared-hosting account, production hosting and cron behavior, real-device UPI testing with GPay, PhonePe, Paytm and BHIM, and confirmation of GitHub Private Vulnerability Reporting settings.
->
-> Review the deployment guides and complete your own environment-specific testing before accepting live payments. Local automated tests and a disposable MySQL installation do not prove that every hosting provider or UPI app has been verified.
+## 📦 Release Status
 
-## 📦 v1.1.0 Stable Release Candidate
+**v1.1.0 is currently a stable release candidate; a v1.1.0 Git tag and GitHub Release have not been published.** The rolling production package is published at the download link above.
 
-**Status:** Release candidate. A v1.1.0 Git tag and GitHub Release have not been published. Real cPanel hosting, production cron behavior, and mobile UPI app flows still require external verification.
+The project includes the browser installer, MySQL production configuration, payment-verification integrations, timestamped webhook signatures, and hosting guides. External verification is still required for each target hosting environment, cron behavior under production conditions, and real-device payment flows with GPay, PhonePe, Paytm, and BHIM. Review the deployment guides and complete your own environment-specific testing before accepting live payments.
 
-**Production ZIP:** Ready-to-install production packages (`upi-gateway-main-<commit>.zip` containing `vendor/` and `public/build/`) are generated automatically by GitHub Actions on every push to `main` and can be downloaded from the **Actions** tab as workflow artifacts (see [cPanel guide](docs/CPANEL.md#obtaining-the-production-package)). Packages can also be built locally using `./scripts/build-release.sh`. Before deploying, verify that the archive contains production Composer dependencies in `vendor/`, compiled assets in `public/build/`, both installer entry points, `.htaccess`, `.env.example`, and the deployment guides, and that secrets, databases, logs, `node_modules/`, and tests are excluded.
+[![Build Production Package](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml/badge.svg?branch=main)](https://github.com/mynkdev-21/upi-gateway/actions/workflows/build-package.yml)
 
-**cPanel installation:** Extract the verified ZIP into a directory outside `public_html`, create a MySQL database and user, and point the domain document root to the application's `public/` directory. Open `/install` over HTTPS to complete the browser wizard. Configure the scheduler and queue-worker cron jobs described in the [cPanel installation guide](docs/CPANEL.md). The prepared package does not require Composer, Node.js, or npm on the hosting server. For an Ubuntu server, follow the [VPS guide](docs/VPS.md).
-
-**Requirements and security:** Use PHP 8.2 or newer with the extensions listed in the [installation guide](docs/INSTALLATION.md), a MySQL-compatible server through the MySQL driver, HTTPS, and writable Laravel runtime directories. The installer sets `APP_DEBUG=false` and `ALLOW_REGISTRATION=false`; keep the application and `.env` outside the public web root. Verify webhook signatures and deduplicate event IDs before fulfilling orders. Review [SECURITY.md](SECURITY.md) before accepting live payments.
-
-**GitHub Release link:** [To be added when v1.1.0 is published].
+---
 
 ## 📖 Overview
 
@@ -238,144 +272,46 @@ flowchart TD
 
 ## 🚀 Installation
 
-UPI Gateway includes a **browser-based Installation Wizard**. You do not need to run Laravel installation commands through the browser. First prepare your hosting environment and MySQL database, then complete the wizard.
+Install UPI Gateway using the browser-based wizard included in the prepared production package. The hosting server does not need SSH, Composer, Node.js, or npm.
 
-Both supported deployment paths use the **same Installation Wizard**:
-
-- **cPanel shared hosting:** prepare the hosting account, upload the prepared production package, and create a MySQL database in cPanel.
-- **Ubuntu VPS:** prepare Ubuntu, Nginx, PHP-FPM, and MySQL, then configure the application web root.
-
-### Installation Guides
-
-| Guide | Description |
-|---|---|
-| [Web Installation Wizard](docs/INSTALLATION.md) | Step-by-step explanation of every wizard screen |
-| [cPanel Installation](docs/CPANEL.md) | Shared hosting setup, database creation, upload, and wizard |
-| [Ubuntu VPS Installation](docs/VPS.md) | Ubuntu, Nginx, PHP-FPM, MySQL, SSL, queue, and scheduler |
-
-### Server Requirements
+### Server requirements
 
 - PHP 8.2 or newer.
-- MySQL database or supported MariaDB server through the MySQL driver (mandatory in production; SQLite is only for automated tests).
+- MySQL or a supported MariaDB server through Laravel's MySQL driver. MySQL is required for installation and production; SQLite is used only by automated tests.
 - PDO and PDO MySQL.
-- Required Laravel PHP extensions, including cURL, OpenSSL, Mbstring, Tokenizer, XML, JSON, and Fileinfo.
+- Required Laravel extensions, including cURL, OpenSSL, Mbstring, Tokenizer, XML, JSON, and Fileinfo.
+- HTTPS for production.
 - Writable Laravel runtime directories with appropriately restricted permissions.
-- HTTPS for production deployments.
-- A prepared production package containing production Composer dependencies in `vendor/` and compiled frontend assets in `public/build/`. The cPanel production server does not need Composer, Node.js, or npm.
+- A production package containing `vendor/` and compiled assets in `public/build/`.
 
-Check the deployment-specific guide for the complete server preparation instructions. Hosting environments can differ, so verify PHP extensions and database access with your hosting provider.
+### Installation steps
 
-### Production Distribution Package
+1. **Download:** Use the [production ZIP](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip). The [SHA-256 checksum](https://github.com/mynkdev-21/upi-gateway/releases/download/latest-main/upi-gateway-production.zip.sha256) is provided for integrity verification.
+2. **Prepare the database:** Create a MySQL database and user, then grant the user the required privileges. In cPanel, use **MySQL Database Wizard** or **MySQL Databases**. Save the full database name, username, and password; cPanel may prepend your account name.
+3. **Upload and extract:** Upload the ZIP using your hosting File Manager and extract it into the application directory described in your hosting guide.
+4. **Configure the public directory:** Set the website's Document Root / Running Directory to the application's `public/` directory. Keep the Laravel project files outside the public web root. For subdirectory deployments or Nginx, follow the relevant guide; panel settings and web-server rules differ by host.
+5. **Open the installer:** Visit `https://yourdomain.com/install` over HTTPS.
+6. **Complete the wizard:** Pass the requirements check, enter and test the MySQL connection, run migrations, and create the administrator account.
+7. **Finish securely:** Sign in to the dashboard and leave the installer protection enabled.
 
-A prepared cPanel release package must include the Laravel application source, production `vendor/` dependencies, compiled `public/build/` assets, installer entry points, required hidden server files, and deployment documentation.
+### Hosting-specific instructions
 
-The production package must not contain `.env`, SQLite/database files, runtime logs, `node_modules/`, tests, or nested development archives. Build assets and install production Composer dependencies before creating the package; cPanel users should not need Composer, Node.js, or npm on the hosting server.
+- [cPanel shared hosting](docs/CPANEL.md) — file placement, MySQL setup, document root, cron jobs, and queue processing.
+- [Ubuntu VPS](docs/VPS.md) — Nginx, PHP-FPM, MySQL, SSL, queue worker, and scheduler.
+- [Detailed installer guide](docs/INSTALLATION.md) — wizard screens, requirements, and troubleshooting.
 
-Keep the Laravel application outside the public web root and configure the domain document root to point only to the application's `public/` directory. Follow the [cPanel guide](docs/CPANEL.md) for the supported directory layout.
+**Document-root warning:** The website must serve the application's `public/` directory, not the project root. If the installer reports an incorrect document root, update the website's Running Directory / Document Root in your hosting panel and refresh the installer. Do not expose `.env`, application source, `vendor/`, or private storage files through HTTP.
 
-### 1. Prepare Your Hosting
+**Subdirectory warning:** A URL such as `https://example.com/payments/` needs web-server routing that maps that URL prefix to the application's `public/` directory. `.htaccess` rules do not apply to Nginx. Follow the hosting guide and do not overwrite the existing main website's configuration.
 
-Before opening the wizard:
+### Need installation help?
 
-- Configure the domain or subdomain.
-- Select PHP 8.2 or newer and enable the required PHP extensions.
-- Create a MySQL database and database user.
-- Assign the required privileges to that user.
-- Configure the web server document root to point to the Laravel `public/` directory.
-- Enable HTTPS.
+We provide free installation guidance:
 
-**cPanel users:** Create the database and user through **MySQL Database Wizard** (or **MySQL Databases**) in cPanel. Save the full database name, username, and password. cPanel may prepend your hosting account username to the database and user names.
+- **[WhatsApp Installation Support](https://wa.me/916388401024)**
+- **[GitHub Issues](https://github.com/mynkdev-21/upi-gateway/issues)**
 
-**VPS users:** Install and configure Nginx, PHP-FPM, MySQL, required PHP extensions, and the application files as described in the [VPS guide](docs/VPS.md).
-
-### 2. Open the Installation Wizard
-
-Visit your domain:
-
-```text
-https://yourdomain.com/install
-```
-
-The wizard guides you through the following steps.
-
-#### Step 1 — Requirements Check
-
-The wizard checks whether the server meets the application's installation requirements. Resolve any failed requirement in your hosting control panel or server configuration before continuing.
-
-#### Step 2 — Database Setup
-
-Enter your application name and URL, then select MySQL and provide the database connection details created during server preparation.
-
-<p align="center">
-  <img src="docs/images/installation/database-setup.png" width="85%" alt="UPI Gateway Installation Wizard - MySQL Database Setup"/>
-  <br/>
-  <sub>Database Setup — enter the MySQL details created in cPanel or configured on your VPS.</sub>
-</p>
-
-Use the **Test connection and continue** button to verify the database connection.
-
-#### Step 3 — Run Migrations
-
-After the database connection succeeds, the wizard creates the required application tables.
-
-<p align="center">
-  <img src="docs/images/installation/migrations-success.png" width="85%" alt="UPI Gateway Installation Wizard - Successful Database Migrations"/>
-  <br/>
-  <sub>Run Migrations — the wizard prepares the database tables.</sub>
-</p>
-
-#### Step 4 — Create Admin Account
-
-Create the initial administrator account using your name, email address, and a strong password.
-
-<p align="center">
-  <img src="docs/images/installation/admin-account.png" width="85%" alt="UPI Gateway Installation Wizard - Create Admin Account"/>
-  <br/>
-  <sub>Create Admin Account — these credentials are used to access the administration dashboard.</sub>
-</p>
-
-After successful setup, sign in to the admin dashboard. The installer is locked after installation; do not bypass or remove the installation protection.
-
-## Installation Support
-
-Having trouble installing UPI Gateway?
-
-We're here to help! We want to make UPI Gateway installation as simple as possible. If you encounter any installation issues, we provide **free installation assistance**.
-
-### Common Installation Issues
-
-**1. Incorrect Document Root**
-
-If the installer reports an incorrect document root, configure your hosting website's Running Directory / Document Root to point to the application's `public` directory.
-
-**2. Apache / Nginx Configuration**
-
-Some hosting providers require additional configuration for clean URLs and public directory mapping. Contact us if you need help.
-
-**3. PHP Extensions or Permissions**
-
-Make sure your hosting environment supports the required PHP version, extensions, and directory permissions.
-
-### Free Installation Assistance
-
-Unable to complete the installation? Don't worry. We provide free installation guidance for UPI Gateway users.
-
-**Contact Support:**
-
-- **WhatsApp Installation Support:** [https://wa.me/916388401024](https://wa.me/916388401024)
-- **GitHub Issues:** [https://github.com/mynkdev-21/upi-gateway/issues](https://github.com/mynkdev-21/upi-gateway/issues)
-
-### What Information Should You Share?
-
-- Hosting provider (cPanel, aaPanel, DirectAdmin, Plesk, VPS, etc.)
-- PHP version
-- Screenshot of the installation error
-- Installation type (main domain, subdomain, or subdirectory)
-- Brief description of the issue
-
-We'll do our best to help you get UPI Gateway successfully installed.
-
-**Security Notice:** Never share hosting passwords, SSH credentials, database passwords, API secrets, or `.env` files when requesting support.
+When contacting support, include your hosting provider, PHP version, deployment type (main domain, subdomain, or subdirectory), and a screenshot of the issue. **Never send passwords, API secrets, SSH credentials, or `.env` files.**
 
 ---
 
