@@ -101,7 +101,20 @@ const { chromium } = require(process.env.TEST_BROWSER_MODULE);
             assertions++;
             const visibleText = await page.locator('body').innerText();
             if (['Nginx configuration', 'PHP-FPM endpoint', 'Application directory', 'Public application address', 'NOT CHECKED'].some(value => visibleText.includes(value))) throw new Error('Technical diagnostics are visible.');
+            if (visibleText.includes('Running Directory to /public')) throw new Error('Public-directory guidance is visible when the mount is already safe.');
             assertions++;
+            // A publicly reachable private sentinel means the panel points at
+            // the project root. Progress stays blocked with one short remedy.
+            const privateSentinel = /\/deployment-private-check\.txt(?:\?.*)?$/;
+            await page.route(privateSentinel, route => route.fulfill({ status: 200, body: 'private sentinel' }));
+            await page.evaluate(() => document.querySelector('[data-hosting-recheck]').click());
+            await page.waitForFunction(() => document.querySelector('[data-hosting-result]')?.textContent === 'Setup not ready', null, { timeout: 30000 });
+            if (!(await page.locator('[data-hosting-message]').innerText()).includes('Running Directory to /public')) throw new Error('Wrong-root guidance was not shown.');
+            if (await next.getAttribute('href') !== null || !(await next.isHidden())) throw new Error('Wrong public root left Next available');
+            assertions += 2;
+            await page.unroute(privateSentinel);
+            await page.evaluate(() => document.querySelector('[data-hosting-recheck]').click());
+            await page.waitForFunction(() => document.querySelector('[data-hosting-result]')?.textContent === 'All checks passed', null, { timeout: 30000 });
             // Verify that a failed CSS/JS response disables progression, and Recheck recovers.
             const javascriptAssets = /\/build\/assets\/[^/]+\.js(?:\?.*)?$/;
             await page.route(javascriptAssets, route => route.fulfill({ status: 404, body: 'missing test asset' }));

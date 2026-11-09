@@ -45,13 +45,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const recheck = panel.querySelector('[data-hosting-recheck]');
     const links = document.querySelectorAll('[data-deployment-continue]');
     const submits = document.querySelectorAll('[data-deployment-submit]');
-    const setStatus = (state) => {
+    const setStatus = (state, reason = null) => {
         panel.dataset.state = state;
         output.textContent = state === 'ready' ? 'All checks passed' : state === 'failed' ? 'Setup not ready' : 'Checking...';
         message.textContent = state === 'ready'
             ? 'Your server is ready. You can continue safely.'
             : state === 'failed'
-                ? 'Your server is not ready for installation. Please contact your hosting administrator.'
+                ? reason === 'public_directory'
+                    ? 'Open your hosting panel and set the website’s Running Directory to /public, then refresh this page.'
+                    : 'Your server is not ready for installation. Please contact your hosting administrator.'
                 : 'We’re making sure everything is ready.';
     };
     const fetchAt = (path, options = {}) => {
@@ -82,6 +84,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             if (!serverReady) throw new Error('A required server capability or writable directory is unavailable.');
             if (new URL(base).origin !== window.location.origin) throw new Error('The configured application origin does not match the browser origin.');
+            stage = 'public_directory';
+            const privateSentinel = await fetchAt('deployment-private-check.txt', {method: 'HEAD'});
+            if (![403, 404].includes(privateSentinel.status)) throw new Error('The website root exposes application-private files.');
             stage = 'routing';
             const route = await fetchAt('__upi_deployment_check');
             routing = route.ok ? await route.json() : null;
@@ -103,7 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!asset.ok || !(asset.headers.get('content-type') || '').includes(type)) throw new Error('A compiled frontend asset failed its HTTP check.');
             }
             stage = 'private_files';
-            for (const path of ['deployment-private-check.txt', '.env', 'vendor/autoload.php', 'storage/logs/laravel.log']) {
+            for (const path of ['.env', 'vendor/autoload.php', 'storage/logs/laravel.log']) {
                 const response = await fetchAt(path, {method: 'HEAD'});
                 if (![403, 404].includes(response.status)) throw new Error('Private-file protection failed for ' + path + '.');
             }
@@ -132,7 +137,7 @@ document.addEventListener('DOMContentLoaded', () => {
             submits.forEach(button => { button.hidden = false; button.disabled = false; });
             setStatus('ready');
         } catch (error) {
-            setStatus('failed');
+            setStatus('failed', stage);
             await reportFailure(stage, error);
         }
     };

@@ -463,6 +463,7 @@ class CpanelInstallerTest extends TestCase
         $response->assertSee('Next');
         $response->assertDontSee('PDO MySQL (required)');
         $response->assertDontSee('PHP-FPM address');
+        $response->assertSee('Running Directory to /public');
     }
 
     public function test_browser_readiness_failures_are_logged_with_a_single_use_session_token(): void
