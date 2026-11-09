@@ -31,6 +31,7 @@ class CpanelInstallerTest extends TestCase
 
         $names = array_column($requirements, 'name');
         $this->assertContains('PHP >= 8.2', $names);
+        $this->assertContains('PHP-FPM execution', $names);
         $this->assertContains('PDO MySQL (required)', $names);
         $this->assertContains('OpenSSL Extension', $names);
         $this->assertContains('Mbstring Extension', $names);
@@ -48,6 +49,7 @@ class CpanelInstallerTest extends TestCase
         $this->assertContains('Production Assets (Vite build)', $names);
 
         $this->assertTrue($installer->allRequirementsPassed());
+        $this->assertFalse($installer->allRequirementsPassed(['PHP-FPM execution' => false]));
     }
 
     public function test_missing_php_extension_is_detected_and_blocks_requirements_pass(): void
@@ -404,9 +406,32 @@ class CpanelInstallerTest extends TestCase
 
         $response = $this->get('/install.php');
         $response->assertOk();
-        $response->assertSee('Server & Extension Checks');
-        $response->assertSee('PDO MySQL (required)');
-        $response->assertSee('Continue to Database Setup');
+        $response->assertSee('Installation readiness');
+        $response->assertSee('Checking...');
+        $response->assertSee('Next');
+        $response->assertDontSee('PDO MySQL (required)');
+        $response->assertDontSee('PHP-FPM address');
+    }
+
+    public function test_browser_readiness_failures_are_logged_with_a_single_use_session_token(): void
+    {
+        $this->removeInstallationMarker();
+        Log::shouldReceive('warning')
+            ->once()
+            ->withArgs(fn (string $message, array $context) => $message === 'Installer browser readiness check failed'
+                && $context['stage'] === 'assets'
+                && $context['message'] === 'Compiled frontend asset failed its HTTP check.');
+
+        $diagnostic = $this->getJson('/__upi_deployment_check')->assertOk()->json();
+        $payload = [
+            'diagnostic_report' => true,
+            'diagnostic_token' => $diagnostic['diagnostic_token'],
+            'stage' => 'assets',
+            'message' => 'Compiled frontend asset failed its HTTP check.',
+        ];
+
+        $this->postJson('/__upi_deployment_check', $payload)->assertOk()->assertJson(['logged' => true]);
+        $this->postJson('/__upi_deployment_check', $payload)->assertForbidden();
     }
 
     public function test_root_install_php_rejects_post_without_csrf_token(): void
@@ -700,8 +725,11 @@ class CpanelInstallerTest extends TestCase
         // 1. Requirements page renders without setup password prompt
         $reqPage = $this->get('/install');
         $reqPage->assertOk();
-        $reqPage->assertSee('Server Requirements');
-        $reqPage->assertSee('Continue to database setup');
+        $reqPage->assertSee('Installation readiness');
+        $reqPage->assertSee('Checking...');
+        $reqPage->assertSee('Next');
+        $reqPage->assertDontSee('PHP-FPM address');
+        $reqPage->assertDontSee('Nginx configuration');
         $reqPage->assertDontSee('Setup Password');
         $reqPage->assertDontSee('setup_password');
 

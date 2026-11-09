@@ -24,7 +24,7 @@
 
     {{-- Steps --}}
     <div class="mb-8 flex w-full max-w-lg items-start justify-between gap-1 overflow-x-auto pb-1">
-        @foreach ([1 => 'Requirements', 2 => 'Database', 3 => 'Migrate', 4 => 'Admin'] as $n => $label)
+        @foreach ([1 => 'Ready', 2 => 'Database', 3 => 'Set up', 4 => 'Account'] as $n => $label)
             <div class="flex items-center gap-2">
                 <div @class([
                     'w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold',

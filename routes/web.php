@@ -16,22 +16,41 @@ use App\Http\Controllers\SettingsController;
 use App\Http\Middleware\RedirectIfInstalled;
 use App\Support\InstallationManager;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 
 // Public diagnostic metadata only; POST proves a session-bound CSRF round trip.
 Route::get('/__upi_deployment_check', function (Request $request, InstallationManager $installer) {
     $probe = bin2hex(random_bytes(16));
+    $diagnosticToken = bin2hex(random_bytes(16));
     $request->session()->put('deployment.probe', $probe);
+    $request->session()->put('deployment.diagnostic', $diagnosticToken);
 
     return response()->json([
         'application' => 'upi-gateway', 'routing' => true, 'runtime' => 'laravel',
         'base_path' => rtrim((string) parse_url(config('app.url'), PHP_URL_PATH), '/'),
-        'cookie_path' => config('session.path'), 'csrf_token' => csrf_token(), 'probe' => $probe,
-        'secure' => $request->isSecure(),
+        'cookie_path' => config('session.path'), 'csrf_token' => csrf_token(), 'probe' => $probe, 'diagnostic_token' => $diagnosticToken,
+        'secure' => $request->isSecure(), 'php_fpm' => PHP_SAPI === 'fpm-fcgi',
         'login_url' => route('login'), 'dashboard_url' => route('dashboard'), 'installed' => $installer->isInstalled(),
     ])->header('Cache-Control', 'no-store');
 });
 Route::post('/__upi_deployment_check', function (Request $request) {
+    if ($request->boolean('diagnostic_report')) {
+        abort_unless(is_string($request->input('diagnostic_token'))
+            && hash_equals((string) $request->session()->pull('deployment.diagnostic'), $request->input('diagnostic_token')), 403);
+        $data = $request->validate([
+            'stage' => ['required', 'string', 'max:40', 'regex:/^[a-z_]+$/'],
+            'message' => ['required', 'string', 'max:500'],
+        ]);
+        Log::warning('Installer browser readiness check failed', [
+            'stage' => $data['stage'],
+            'message' => $data['message'],
+            'url_prefix' => rtrim((string) parse_url(config('app.url'), PHP_URL_PATH), '/'),
+        ]);
+
+        return response()->json(['logged' => true])->header('Cache-Control', 'no-store');
+    }
+
     abort_unless(is_string($request->input('probe')) && hash_equals((string) $request->session()->pull('deployment.probe'), $request->input('probe')), 403);
 
     return response()->json(['session' => true, 'csrf' => true])->header('Cache-Control', 'no-store');

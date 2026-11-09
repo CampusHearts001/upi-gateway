@@ -27,9 +27,9 @@ const { chromium } = require(process.env.TEST_BROWSER_MODULE);
             if (phase === 'install') {
                 let stage = 'requirements';
                 const waitPass = async () => {
-                    await page.waitForFunction(() => /^(PASS|FAIL)/.test(document.querySelector('[data-hosting-result]')?.textContent || ''));
+                    await page.waitForFunction(() => ['All checks passed', 'Setup not ready'].includes(document.querySelector('[data-hosting-result]')?.textContent || ''));
                     const result = await page.locator('[data-hosting-result]').innerText();
-                    if (!result.startsWith('PASS')) throw new Error(result);
+                    if (result !== 'All checks passed') throw new Error(result);
                 };
                 try {
                 if (!mysql) throw new Error('A disposable MySQL configuration is required.');
@@ -63,9 +63,9 @@ const { chromium } = require(process.env.TEST_BROWSER_MODULE);
                 await page.getByRole('button', {name: 'Finalize Installation'}).click();
                 stage = 'final preflight';
                 await waitPass();
-                if (await page.locator('[data-hosting-state="lock"]').innerText() !== 'PASS') throw new Error('Fresh installer did not lock.');
+                if ((await page.locator('body').innerText()).includes('PHP-FPM endpoint')) throw new Error('Technical diagnostics are visible.');
                 assertions++;
-                await page.getByRole('link', {name: 'Proceed to Merchant Login'}).click();
+                await page.getByRole('link', {name: 'Go to Login'}).click();
                 if (page.url() !== base + '/login') throw new Error('Fresh login URL is incorrect.');
                 assertions++;
                 await page.locator('input[name="email"]').fill('fresh@example.test');
@@ -83,35 +83,36 @@ const { chromium } = require(process.env.TEST_BROWSER_MODULE);
                 continue;
                 } catch (error) {
                     const result = await page.locator('[data-hosting-result]').textContent().catch(() => 'no diagnostic response');
-                    const states = await page.locator('[data-hosting-state]').allTextContents();
-                    throw new Error(`${base} ${stage}: ${result}; ${error.message.split('Call log:')[0]}; states=${states.join(', ')}; probes=${responses.join('; ')}`);
+                    throw new Error(`${base} ${stage}: ${result}; ${error.message.split('Call log:')[0]}; probes=${responses.join('; ')}`);
                 }
             }
             await page.goto(base + '/install.php' + (phase === 'final' ? '?step=done' : ''), { waitUntil: 'domcontentloaded' });
             try {
-                await page.waitForFunction(() => /^(PASS|FAIL)/.test(document.querySelector('[data-hosting-result]')?.textContent || ''), null, { timeout: 30000 });
+                await page.waitForFunction(() => ['All checks passed', 'Setup not ready'].includes(document.querySelector('[data-hosting-result]')?.textContent || ''), null, { timeout: 30000 });
             } catch (error) {
                 throw new Error(`${base} ${phase}: ${await page.locator('[data-hosting-result]').textContent()} ${errors.join('; ')}`);
             }
             const result = await page.locator('[data-hosting-result]').textContent();
-            if (!result.startsWith('PASS')) throw new Error(`${base} ${phase}: ${result}`);
+            if (result !== 'All checks passed') throw new Error(`${base} ${phase}: ${result}`);
             const next = page.locator('[data-deployment-continue]');
             const target = await next.evaluate(element => element.href);
             const expected = base + (phase === 'final' ? '/login' : '/install.php?step=database');
             if (target !== expected) throw new Error(`Incorrect enabled Continue URL: ${target}, expected ${expected}`);
             assertions++;
-            if (await page.locator('[data-hosting-state="session"]').innerText() !== 'PASS') throw new Error('Browser session/CSRF check failed');
+            const visibleText = await page.locator('body').innerText();
+            if (['Nginx configuration', 'PHP-FPM endpoint', 'Application directory', 'Public application address', 'NOT CHECKED'].some(value => visibleText.includes(value))) throw new Error('Technical diagnostics are visible.');
             assertions++;
             // Verify that a failed CSS/JS response disables progression, and Recheck recovers.
             const javascriptAssets = /\/build\/assets\/[^/]+\.js(?:\?.*)?$/;
             await page.route(javascriptAssets, route => route.fulfill({ status: 404, body: 'missing test asset' }));
-            await page.locator('[data-hosting-recheck]').click();
-            await page.waitForFunction(() => document.querySelector('[data-hosting-result]')?.textContent.startsWith('FAIL'), null, { timeout: 30000 });
-            if (await next.getAttribute('href') !== null) throw new Error('Failed checks left Continue enabled');
+            await page.evaluate(() => document.querySelector('[data-hosting-recheck]').click());
+            await page.waitForFunction(() => document.querySelector('[data-hosting-result]')?.textContent === 'Setup not ready', null, { timeout: 30000 });
+            if (await next.getAttribute('href') !== null || !(await next.isHidden())) throw new Error('Failed checks left Next available');
+            if ((await page.locator('body').innerText()).includes('compiled frontend')) throw new Error('Raw diagnostic error is visible.');
             assertions++;
             await page.unroute(javascriptAssets);
-            await page.locator('[data-hosting-recheck]').click();
-            await page.waitForFunction(() => document.querySelector('[data-hosting-result]')?.textContent.startsWith('PASS'), null, { timeout: 30000 });
+            await page.evaluate(() => document.querySelector('[data-hosting-recheck]').click());
+            await page.waitForFunction(() => document.querySelector('[data-hosting-result]')?.textContent === 'All checks passed', null, { timeout: 30000 });
             if (!(await next.getAttribute('href'))) throw new Error('Recheck did not restore Continue');
             assertions++;
             await context.close();

@@ -2,7 +2,7 @@
 @php $step = 4; @endphp
 
 @section('content')
-@include('install.hosting-check', ['deploymentUrl' => config('app.url')])
+@include('install.hosting-check', ['deploymentUrl' => config('app.url'), 'serverReady' => $serverReady])
 <h1 class="text-2xl font-bold text-slate-900">Create Admin Account</h1>
 <p class="mt-1 text-sm text-slate-500">This will be your admin login for the dashboard.</p>
 
@@ -32,7 +32,7 @@
         <input type="password" name="password_confirmation" class="input" required autocomplete="new-password">
     </div>
 
-    <button data-deployment-submit type="submit" disabled class="btn btn-primary w-full justify-center py-2.5">
+    <button hidden data-deployment-submit type="submit" disabled class="btn btn-primary w-full justify-center py-2.5">
         Create account and finish <x-icon name="arrow-right" class="w-4 h-4" />
     </button>
 </form>

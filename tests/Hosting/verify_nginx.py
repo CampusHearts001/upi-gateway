@@ -460,7 +460,7 @@ SetHandler "proxy:fcgi://127.0.0.1:{fpm_port}"
             status, _, body = request(prefix + "/__upi_deployment_check")
             expect(status == 200 and json.loads(body)["base_path"] == prefix, f"{host}: fresh browser route probe")
             status, _, page = request(prefix + '/install.php')
-            expect(status == 200 and b'NOT CHECKED' in page and b'Public application address' in page, f'{host}: fresh environment diagnostics')
+            expect(status == 200 and b'Checking...' in page and b'PHP-FPM endpoint' not in page and b'Application directory' not in page, f'{host}: simplified readiness screen')
             native_token = html.unescape(re.search(r'name="_token" value="([^"]+)"', request(prefix + '/install.php?step=database')[2].decode())[1])
             parameters = urllib.parse.urlencode({'_token': native_token}).encode()
             expect(request(prefix + '/install.php?step=deployment-check', parameters, {'Content-Type': 'application/x-www-form-urlencoded'})[0] == 200, f'{host}: native session CSRF round trip')

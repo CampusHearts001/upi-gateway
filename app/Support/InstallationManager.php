@@ -442,6 +442,7 @@ class InstallationManager
 
         $checks = [
             ['name' => 'PHP >= 8.2', 'required' => true, 'pass' => version_compare(PHP_VERSION, '8.2.0', '>=')],
+            ['name' => 'PHP-FPM execution', 'required' => true, 'pass' => PHP_SAPI === 'cli' || PHP_SAPI === 'fpm-fcgi'],
             ['name' => 'PDO Extension', 'required' => true, 'pass' => extension_loaded('pdo')],
             ['name' => 'PDO MySQL (required)', 'required' => true, 'pass' => extension_loaded('pdo_mysql')],
             ['name' => 'OpenSSL Extension', 'required' => true, 'pass' => extension_loaded('openssl')],
