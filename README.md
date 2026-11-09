@@ -336,6 +336,47 @@ Create the initial administrator account using your name, email address, and a s
 
 After successful setup, sign in to the admin dashboard. The installer is locked after installation; do not bypass or remove the installation protection.
 
+## Installation Support
+
+Having trouble installing UPI Gateway?
+
+We're here to help! We want to make UPI Gateway installation as simple as possible. If you encounter any installation issues, we provide **free installation assistance**.
+
+### Common Installation Issues
+
+**1. Incorrect Document Root**
+
+If the installer reports an incorrect document root, configure your hosting website's Running Directory / Document Root to point to the application's `public` directory.
+
+**2. Apache / Nginx Configuration**
+
+Some hosting providers require additional configuration for clean URLs and public directory mapping. Contact us if you need help.
+
+**3. PHP Extensions or Permissions**
+
+Make sure your hosting environment supports the required PHP version, extensions, and directory permissions.
+
+### Free Installation Assistance
+
+Unable to complete the installation? Don't worry. We provide free installation guidance for UPI Gateway users.
+
+**Contact Support:**
+
+- **WhatsApp Installation Support:** [https://wa.me/916388401024](https://wa.me/916388401024)
+- **GitHub Issues:** [https://github.com/mynkdev-21/upi-gateway/issues](https://github.com/mynkdev-21/upi-gateway/issues)
+
+### What Information Should You Share?
+
+- Hosting provider (cPanel, aaPanel, DirectAdmin, Plesk, VPS, etc.)
+- PHP version
+- Screenshot of the installation error
+- Installation type (main domain, subdomain, or subdirectory)
+- Brief description of the issue
+
+We'll do our best to help you get UPI Gateway successfully installed.
+
+**Security Notice:** Never share hosting passwords, SSH credentials, database passwords, API secrets, or `.env` files when requesting support.
+
 ---
 
 ## 🔐 Environment Configuration
