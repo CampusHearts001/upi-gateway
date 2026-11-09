@@ -357,6 +357,17 @@ if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_s
     }
 }
 
+if ($step === 'admin' && ! $installer->databaseIsMigrated()) {
+    if ($method === 'POST') {
+        http_response_code(409);
+        $error = 'Database setup must be completed before creating the administrator.';
+    } else {
+        header('Location: '.$installerUrl.'?step=migrate');
+
+        return;
+    }
+}
+
 if ($method === 'POST' && ! $error) {
     if ($step === 'database') {
         $dbHost = trim($_POST['db_host'] ?? '');

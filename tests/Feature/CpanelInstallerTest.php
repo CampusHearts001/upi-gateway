@@ -171,6 +171,58 @@ class CpanelInstallerTest extends TestCase
         }
     }
 
+    public function test_empty_quoted_app_key_is_replaced_and_cloudflare_proxies_are_detected(): void
+    {
+        $installer = app(InstallationManager::class);
+        $tempEnv = tempnam(sys_get_temp_dir(), 'test_env_');
+        file_put_contents($tempEnv, "APP_KEY=\"\"\nTRUSTED_PROXIES=\"\"\n");
+        $originalConfig = [
+            'installer.env_path' => config('installer.env_path'),
+            'app.key' => config('app.key'),
+            'app.env' => config('app.env'),
+            'app.debug' => config('app.debug'),
+            'app.url' => config('app.url'),
+            'app.asset_url' => config('app.asset_url'),
+            'session.path' => config('session.path'),
+            'session.cookie' => config('session.cookie'),
+            'session.secure' => config('session.secure'),
+            'proxy.trusted_proxies' => config('proxy.trusted_proxies'),
+        ];
+        config(['installer.env_path' => $tempEnv]);
+        $originalServer = $_SERVER;
+        $_SERVER['REMOTE_ADDR'] = '173.245.48.10';
+
+        try {
+            $installer->writeEnvironment([
+                'db_connection' => 'mysql',
+                'db_host' => '127.0.0.1',
+                'db_port' => 3306,
+                'db_database' => 'upi_gateway_prod',
+                'db_username' => 'upi_user',
+                'db_password' => '',
+                'app_name' => 'UPI Gateway',
+                'app_url' => 'https://payments.example.com',
+            ]);
+
+            $content = file_get_contents($tempEnv);
+            $this->assertMatchesRegularExpression('/^APP_KEY=base64:[A-Za-z0-9+\/=]{44}$/m', $content);
+            $this->assertStringContainsString('TRUSTED_PROXIES="173.245.48.0/20,', $content);
+            $this->assertStringNotContainsString('TRUSTED_PROXIES="*"', $content);
+        } finally {
+            $_SERVER = $originalServer;
+            config($originalConfig);
+            @unlink($tempEnv);
+        }
+    }
+
+    public function test_untrusted_direct_client_does_not_enable_forwarded_header_trust(): void
+    {
+        $this->assertSame('', app(InstallationManager::class)->detectedTrustedProxies([
+            'REMOTE_ADDR' => '198.51.100.20',
+            'HTTP_X_FORWARDED_PROTO' => 'https',
+        ]));
+    }
+
     // ── 4. Migrations & Required Tables ──────────────────────────────────────
 
     public function test_migration_verification_checks_all_core_tables(): void

@@ -12,6 +12,17 @@ use Throwable;
 
 class InstallationManager
 {
+    private const CLOUDFLARE_PROXY_CIDRS = [
+        '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+        '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+        '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+        '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+        '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+        '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+    ];
+
+    private const LOCAL_PROXY_CIDRS = ['127.0.0.1/8', '::1/128'];
+
     public function hasAdminUser(): bool
     {
         try {
@@ -144,19 +155,8 @@ class InstallationManager
             return false;
         }
 
-        $cloudflareCidrs = [
-            '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
-            '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
-            '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
-            '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
-            '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
-            '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
-        ];
-
-        $localProxyCidrs = ['127.0.0.1/8', '::1/128'];
-
         $isCloudflareProxy = false;
-        foreach ($cloudflareCidrs as $cidr) {
+        foreach (self::CLOUDFLARE_PROXY_CIDRS as $cidr) {
             if ($this->ipInRange($remoteAddr, $cidr)) {
                 $isCloudflareProxy = true;
                 break;
@@ -164,7 +164,7 @@ class InstallationManager
         }
 
         $isLocalProxy = false;
-        foreach ($localProxyCidrs as $cidr) {
+        foreach (self::LOCAL_PROXY_CIDRS as $cidr) {
             if ($this->ipInRange($remoteAddr, $cidr)) {
                 $isLocalProxy = true;
                 break;
@@ -206,6 +206,20 @@ class InstallationManager
         }
 
         return false;
+    }
+
+    public function detectedTrustedProxies(array $server = []): string
+    {
+        $server = ! empty($server) ? $server : ($_SERVER ?? []);
+        $remoteAddr = (string) ($server['REMOTE_ADDR'] ?? '');
+
+        foreach (self::CLOUDFLARE_PROXY_CIDRS as $cidr) {
+            if ($this->ipInRange($remoteAddr, $cidr)) {
+                return implode(',', self::CLOUDFLARE_PROXY_CIDRS);
+            }
+        }
+
+        return '';
     }
 
     public function detectApplicationUrl($request = null, array $server = []): string
@@ -590,6 +604,12 @@ class InstallationManager
         $appKey = $existingKey !== ''
             ? $existingKey
             : 'base64:'.base64_encode(Encrypter::generateKey(config('app.cipher')));
+        $trustedProxies = trim((string) ($data['trusted_proxies']
+            ?? $this->valueFromEnvironment($env, 'TRUSTED_PROXIES')));
+        if ($trustedProxies === '') {
+            $trustedProxies = $this->detectedTrustedProxies();
+        }
+        TrustedProxyConfiguration::addresses($trustedProxies);
 
         $existingNodeId = $data['verification_node_id'] ?? $this->valueFromEnvironment($env, 'GATEWAY_VERIFICATION_NODE_ID');
         $nodeId = $this->isPlaceholderNodeId($existingNodeId)
@@ -604,6 +624,7 @@ class InstallationManager
             'ALLOW_REGISTRATION' => 'false',
             'APP_URL' => $this->envValue($data['app_url']),
             'ASSET_URL' => $this->envValue($data['app_url']),
+            'TRUSTED_PROXIES' => $this->envValue($trustedProxies),
             'SESSION_PATH' => $this->envValue(DeploymentUrl::cookiePath($data['app_url'])),
             'SESSION_COOKIE' => $this->envValue(DeploymentUrl::cookieName($data['app_url'])),
             'LOG_LEVEL' => 'error',
@@ -649,6 +670,7 @@ class InstallationManager
             'session.path' => DeploymentUrl::cookiePath($data['app_url']),
             'session.cookie' => DeploymentUrl::cookieName($data['app_url']),
             'session.secure' => str_starts_with(strtolower($data['app_url']), 'https://'),
+            'proxy.trusted_proxies' => $trustedProxies,
             'gateway.verification_node_id' => $nodeId,
         ]);
     }

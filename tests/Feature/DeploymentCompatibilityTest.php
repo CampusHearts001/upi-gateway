@@ -85,6 +85,7 @@ class DeploymentCompatibilityTest extends TestCase
         Storage::disk('public')->put('receipts/example.txt', 'public receipt');
         Storage::disk('public')->put('.private', 'must not be returned');
         config(['app.url' => 'http://localhost/payment']);
+        $this->withServerVariables(['SCRIPT_NAME' => '/payment/public/index.php']);
         $this->get('/payment/storage/receipts/example.txt')->assertOk()->assertHeader('X-Content-Type-Options', 'nosniff');
         $this->get('/payment/storage/.private')->assertNotFound();
         $this->get('/payment/storage/../.env')->assertNotFound();
