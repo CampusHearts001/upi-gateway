@@ -25,6 +25,8 @@ if (version_compare(PHP_VERSION, '8.2.0', '<')) {
     return;
 }
 
+http_response_code(200);
+
 $baseDir = __DIR__;
 $installedFile = $baseDir.'/storage/installed';
 
@@ -48,6 +50,15 @@ require_once $baseDir.'/app/Support/DeploymentFilesystem.php';
 DeploymentFilesystem::prepare($baseDir);
 $installerBasePath = DeploymentUrl::basePath($_SERVER);
 $installerUrl = $installerBasePath.'/install.php';
+
+if (! function_exists('installer_redirect')) {
+    function installer_redirect(string $url, int $status = 302): void
+    {
+        $GLOBALS['__installer_location'] = $url;
+        http_response_code($status);
+        header('Location: '.$url, true, $status);
+    }
+}
 
 if (! function_exists('installer_ip_in_range')) {
     function installer_ip_in_range(string $ip, string $range): bool
@@ -307,9 +318,49 @@ $app = function_exists('app') && app()->bound(Kernel::class)
 $kernel = $app->make(Kernel::class);
 $kernel->bootstrap();
 $installer = app(InstallationManager::class);
-$installer->ensureSetupState();
+try {
+    $installer->ensureSetupState();
+} catch (RuntimeException) {
+    http_response_code(503);
+    header('Content-Type: text/html; charset=utf-8');
+    ?>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Setup Unavailable · UPI Gateway</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; padding: 2rem; display: flex; align-items: center; justify-content: center; min-height: 80vh; }
+            .card { background: #ffffff; max-width: 480px; width: 100%; padding: 2rem; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); border: 1px solid #e2e8f0; text-align: center; }
+            .badge { display: inline-block; padding: 0.35rem 0.85rem; border-radius: 9999px; background: #fee2e2; color: #991b1b; font-size: 0.8rem; font-weight: 700; margin-bottom: 1rem; }
+            h1 { font-size: 1.35rem; margin-bottom: 0.75rem; color: #0f172a; }
+            p { color: #64748b; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.5rem; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <span class="badge">SETUP UNAVAILABLE</span>
+            <h1>Installation Lock Unavailable</h1>
+            <p>The installation lock file could not be safely initialized due to file permissions. Please verify permissions in the storage directory.</p>
+        </div>
+    </body>
+    </html>
+    <?php
+    return;
+}
 
-$step = $_GET['step'] ?? 'requirements';
+if (empty($_SESSION['_installer_setup_token'])) {
+    if ($token = $installer->getSetupToken()) {
+        $_SESSION['_installer_setup_token'] = $token;
+    }
+}
+if (empty($_SESSION['_installer_diagnostic_token'])) {
+    $_SESSION['_installer_diagnostic_token'] = bin2hex(random_bytes(16));
+}
+$diagnosticToken = $_SESSION['_installer_diagnostic_token'];
+
+$step = $_GET['step'] ?? (function_exists('request') ? request()->query('step', 'requirements') : 'requirements');
 $error = null;
 $success = null;
 
@@ -329,21 +380,77 @@ if ($method === 'POST') {
 if ($method === 'POST' && $step === 'deployment-check') {
     header('Content-Type: application/json');
     header('Cache-Control: no-store');
+    if ($alreadyInstalled) {
+        http_response_code(403);
+        echo json_encode(['error' => 'Application is already installed.']);
+
+        return;
+    }
     if (! $error && (string) ($_POST['diagnostic_report'] ?? '') === '1') {
+        $submittedToken = (string) ($_POST['diagnostic_token'] ?? '');
+        $sessionToken = (string) ($_SESSION['_installer_diagnostic_token'] ?? '');
+        if ($sessionToken === '' || ! hash_equals($sessionToken, $submittedToken)) {
+            http_response_code(403);
+            echo json_encode(['error' => 'Invalid diagnostic token.']);
+
+            return;
+        }
+        $_SESSION['_installer_diagnostic_token'] = bin2hex(random_bytes(16));
+
         $stage = preg_match('/^[a-z_]{1,40}$/', (string) ($_POST['stage'] ?? '')) ? (string) $_POST['stage'] : 'unknown';
-        $message = preg_replace('/[\x00-\x1f\x7f]/', ' ', (string) ($_POST['message'] ?? 'Unknown readiness failure'));
+        $rawMessage = (string) ($_POST['message'] ?? 'Unknown readiness failure');
+        $sanitizedMessage = preg_replace('/(?:\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f])/', ' ', $rawMessage);
+        $sanitizedMessage = trim(preg_replace('/\s+/', ' ', (string) $sanitizedMessage));
         error_log('[UPI Gateway installer] Browser readiness check failed: '.json_encode([
             'stage' => $stage,
-            'message' => mb_substr($message, 0, 500),
+            'message' => mb_substr($sanitizedMessage, 0, 500),
             'url_prefix' => $installerBasePath,
         ], JSON_UNESCAPED_SLASHES));
         echo json_encode(['logged' => true]);
 
         return;
     }
-    echo json_encode(['session' => ! $error, 'csrf' => ! $error, 'cookie_path' => ini_get('session.cookie_path')]);
+    $readiness = $installer->verifyServerReadiness($_SERVER);
+    if (! $error && $readiness['ready']) {
+        $_SESSION['_installer_readiness_passed'] = true;
+    } else {
+        unset($_SESSION['_installer_readiness_passed']);
+    }
+    echo json_encode([
+        'session' => ! $error,
+        'csrf' => ! $error,
+        'ready' => $readiness['ready'],
+        'php_handler' => $installer->detectPhpHandler(),
+        'cookie_path' => ini_get('session.cookie_path'),
+    ]);
 
     return;
+}
+
+if ($step === 'requirements') {
+    $readiness = $installer->verifyServerReadiness($_SERVER);
+    if ($readiness['ready']) {
+        $_SESSION['_installer_readiness_passed'] = true;
+    } else {
+        unset($_SESSION['_installer_readiness_passed']);
+    }
+}
+
+if (! $error && $step === 'database') {
+    $readiness = $installer->verifyServerReadiness($_SERVER);
+    if (! $readiness['ready'] || empty($_SESSION['_installer_readiness_passed'])) {
+        if ($method === 'POST') {
+            http_response_code(403);
+            $error = ! $readiness['ready']
+                ? $readiness['message']
+                : 'Server readiness verification must be completed before database setup.';
+            $step = 'requirements';
+        } else {
+            installer_redirect($installerUrl.'?step=requirements');
+
+            return;
+        }
+    }
 }
 
 if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_setup_authorized'])) {
@@ -351,7 +458,7 @@ if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_s
         http_response_code(403);
         $error = 'Database setup must be completed before proceeding.';
     } else {
-        header('Location: '.$installerUrl.'?step=database');
+        installer_redirect($installerUrl.'?step=database');
 
         return;
     }
@@ -362,14 +469,22 @@ if ($step === 'admin' && ! $installer->databaseIsMigrated()) {
         http_response_code(409);
         $error = 'Database setup must be completed before creating the administrator.';
     } else {
-        header('Location: '.$installerUrl.'?step=migrate');
+        installer_redirect($installerUrl.'?step=migrate');
 
         return;
     }
 }
 
 if ($method === 'POST' && ! $error) {
-    if ($step === 'database') {
+    if (! $error && $step === 'database') {
+        if (empty($_SESSION['_installer_setup_authorized'])) {
+            $setupToken = $_POST['setup_token'] ?? ($_SESSION['_installer_setup_token'] ?? null);
+            if (! is_string($setupToken) || ! $installer->validSetupToken($setupToken)) {
+                http_response_code(403);
+                $error = 'Installer setup authorization token is invalid, expired, or already used.';
+            }
+        }
+
         $dbHost = trim($_POST['db_host'] ?? '');
         $dbPort = (int) ($_POST['db_port'] ?? 3306);
         $dbDatabase = trim($_POST['db_database'] ?? '');
@@ -379,22 +494,8 @@ if ($method === 'POST' && ! $error) {
         $appUrl = rtrim(trim($_POST['app_url'] ?? ''), '/');
 
         // Validation
-        if ($dbHost === '' || preg_match('/[\r\n]/', $dbHost)) {
-            $error = 'Invalid database host.';
-        } elseif (! $installer->isAllowedDatabaseHost($dbHost)) {
-            $error = 'Database host must be local (127.0.0.1 or localhost) for security during web installation.';
-        } elseif ($dbPort < 1 || $dbPort > 65535) {
-            $error = 'Database port must be between 1 and 65535.';
-        } elseif ($dbDatabase === '' || ! preg_match('/^[A-Za-z0-9_$-]+$/', $dbDatabase)) {
-            $error = 'Database name contains invalid characters.';
-        } elseif ($dbUsername === '' || preg_match('/[\r\n]/', $dbUsername)) {
-            $error = 'Invalid database username.';
-        } elseif (preg_match('/[\r\n]/', $dbPassword)) {
-            $error = 'Database password cannot contain newlines.';
-        } elseif ($appName === '' || preg_match('/[\r\n]/', $appName)) {
-            $error = 'Invalid application name.';
-        } elseif ($appUrl === '' || ! filter_var($appUrl, FILTER_VALIDATE_URL)) {
-            $error = 'Please enter a valid application URL (e.g. https://yourdomain.com).';
+        if (! $error) {
+            $error = $installer->validateDatabaseConfig($_POST);
         }
 
         if (! $error) {
@@ -409,25 +510,35 @@ if ($method === 'POST' && ! $error) {
                     'db_password' => $dbPassword,
                 ]);
 
-                // Write environment atomically
-                $installer->writeEnvironment([
-                    'db_connection' => 'mysql',
-                    'db_host' => $dbHost,
-                    'db_port' => $dbPort,
-                    'db_database' => $dbDatabase,
-                    'db_username' => $dbUsername,
-                    'db_password' => $dbPassword,
-                    'app_name' => $appName,
-                    'app_url' => $appUrl,
-                ]);
+                if (empty($_SESSION['_installer_setup_authorized'])) {
+                    if (! is_string($setupToken) || ! $installer->consumeSetupToken($setupToken)) {
+                        http_response_code(403);
+                        $error = 'Installer setup authorization token could not be verified.';
+                    }
+                }
 
-                Artisan::call('config:clear');
-                session_regenerate_id(true);
-                $_SESSION['_installer_db_configured'] = true;
-                $_SESSION['_installer_setup_authorized'] = true;
-                header('Location: '.$installerUrl.'?step=migrate');
+                if (! $error) {
+                    // Write environment atomically
+                    $installer->writeEnvironment([
+                        'db_connection' => 'mysql',
+                        'db_host' => $dbHost,
+                        'db_port' => $dbPort,
+                        'db_database' => $dbDatabase,
+                        'db_username' => $dbUsername,
+                        'db_password' => $dbPassword,
+                        'app_name' => $appName,
+                        'app_url' => $appUrl,
+                    ]);
 
-                return;
+                    Artisan::call('config:clear');
+                    session_regenerate_id(true);
+                    unset($_SESSION['_installer_setup_token']);
+                    $_SESSION['_installer_db_configured'] = true;
+                    $_SESSION['_installer_setup_authorized'] = true;
+                    installer_redirect($installerUrl.'?step=migrate');
+
+                    return;
+                }
             } catch (Throwable) {
                 $error = 'Could not connect to the database with the provided credentials. Check database name, username, password and host in cPanel.';
             }
@@ -437,7 +548,7 @@ if ($method === 'POST' && ! $error) {
             $exitCode = Artisan::call('migrate', ['--force' => true]);
             if ($exitCode === 0 && $installer->databaseIsMigrated()) {
                 $_SESSION['_installer_migrated'] = true;
-                header('Location: '.$installerUrl.'?step=admin');
+                installer_redirect($installerUrl.'?step=admin');
 
                 return;
             } else {
@@ -469,7 +580,7 @@ if ($method === 'POST' && ! $error) {
                 $_SESSION = [];
                 session_regenerate_id(true);
                 $_SESSION['_installer_completed'] = true;
-                header('Location: '.$installerUrl.'?step=done');
+                installer_redirect($installerUrl.'?step=done');
 
                 return;
             } catch (Throwable $e) {
@@ -629,16 +740,17 @@ if (! $allPassed) {
         <?php if ($step === 'requirements') { ?>
             <h2 style="text-align:center;">Installation readiness</h2>
             <p class="subtitle" style="text-align:center;">This will only take a moment.</p>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'deploymentDiagnosticToken' => $diagnosticToken, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
             <?php if ($allPassed) { ?>
                 <a hidden data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=database" class="btn">Next &rarr;</a>
             <?php } ?>
 
-        <?php } elseif ($step === 'database') { ?>
+        <?php } elseif (! $error && $step === 'database') { ?>
             <h2>Database Configuration</h2>
             <p class="subtitle">Enter your MySQL database credentials created in cPanel MySQL Databases.</p>
             <form method="POST" action="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=database">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="setup_token" value="<?= htmlspecialchars($_SESSION['_installer_setup_token'] ?? '', ENT_QUOTES, 'UTF-8') ?>">
                 <div class="form-group">
                     <label>Application Name</label>
                     <input type="text" name="app_name" value="<?= htmlspecialchars($_POST['app_name'] ?? 'UPI Gateway', ENT_QUOTES, 'UTF-8') ?>" required>
@@ -683,7 +795,7 @@ if (! $allPassed) {
 
         <?php } elseif ($step === 'admin') { ?>
             <h2>Create Primary Administrator</h2>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'deploymentDiagnosticToken' => $diagnosticToken, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
             <p class="subtitle">Set up the master administrator account for dashboard access and API configuration.</p>
             <form method="POST" action="<?= htmlspecialchars($installerUrl, ENT_QUOTES, 'UTF-8') ?>?step=admin">
                 <input type="hidden" name="_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
@@ -708,7 +820,7 @@ if (! $allPassed) {
 
         <?php } elseif ($step === 'done') { ?>
             <h2 style="text-align:center;">Installation complete</h2>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'finalCheck' => true, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentDiagnosticToken' => $diagnosticToken, 'finalCheck' => true, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
             <p class="subtitle" style="text-align:center;">Your account and database are ready.</p>
             <a hidden data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Go to Login &rarr;</a>
         <?php } ?>

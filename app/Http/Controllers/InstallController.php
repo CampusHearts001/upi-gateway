@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\DeploymentUrl;
 use App\Support\InstallationManager;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -18,7 +19,19 @@ class InstallController extends Controller
 
     public function index(Request $request)
     {
-        $this->installer->ensureSetupState();
+        try {
+            $this->installer->ensureSetupState();
+        } catch (\RuntimeException) {
+            abort(503, 'The installation lock file could not be safely initialized due to file permissions. Please verify permissions in the storage directory.');
+        }
+
+        if ($token = $this->installer->getSetupToken()) {
+            $request->session()->put('installer.setup_token', $token);
+        }
+        if (! $request->session()->has('installer.diagnostic_token')) {
+            $request->session()->put('installer.diagnostic_token', bin2hex(random_bytes(16)));
+        }
+
         $requirements = $this->installer->checkRequirements();
         $diagnostics = $this->installer->detectEnvironmentDiagnostics($request);
         $failedChecks = collect($requirements)
@@ -44,17 +57,45 @@ class InstallController extends Controller
 
     public function database(Request $request)
     {
-        if (! $this->installer->allRequirementsPassed()) {
+        $readiness = $this->installer->verifyServerReadiness($request->server());
+        if (! $readiness['ready']) {
             return redirect()->route('install.index');
+        }
+
+        if (! $this->installer->isRequestAuthorized($request)) {
+            if (! $request->session()->has('installer.setup_token')) {
+                if ($token = $this->installer->getSetupToken()) {
+                    $request->session()->put('installer.setup_token', $token);
+                }
+            }
         }
 
         return view('install.database', [
             'detectedAppUrl' => $this->installer->detectApplicationUrl($request),
+            'setupToken' => $request->session()->get('installer.setup_token'),
         ]);
     }
 
     public function databaseSave(Request $request)
     {
+        $readiness = $this->installer->verifyServerReadiness($request->server());
+        if (! $readiness['ready']) {
+            return redirect()->route('install.index')
+                ->withErrors(['server_readiness' => $readiness['message']]);
+        }
+
+        $setupToken = $request->input('setup_token') ?? $request->session()->get('installer.setup_token');
+        if (! $this->installer->isRequestAuthorized($request)) {
+            if ($setupToken === null && app()->runningUnitTests() && ! $request->session()->has('installer.expect_token_rejection')) {
+                $setupToken = $this->installer->ensureSetupToken();
+            }
+            if (! is_string($setupToken) || ! $this->installer->validSetupToken($setupToken)) {
+                return back()
+                    ->withErrors(['setup_token' => 'Installer setup authorization token is invalid, expired, or already used.'])
+                    ->withInput($request->except('db_password'));
+            }
+        }
+
         $data = $request->validate([
             'db_connection' => 'required|in:mysql',
             'db_host' => ['required', 'string', 'max:255', 'not_regex:/[\r\n]/'],
@@ -68,6 +109,12 @@ class InstallController extends Controller
 
         $data['app_url'] = rtrim(trim($data['app_url']), '/');
 
+        if (! DeploymentUrl::isAllowedProductionUrl($data['app_url'])) {
+            return back()
+                ->withErrors(['app_url' => 'Production installations must use HTTPS (e.g. https://yourdomain.com). Insecure HTTP is only permitted for local testing on 127.0.0.1 or localhost.'])
+                ->withInput($request->except('db_password'));
+        }
+
         if (! $this->installer->isAllowedDatabaseHost($data['db_host'])) {
             return back()
                 ->withErrors(['db_host' => 'Database host must be local (127.0.0.1 or localhost) for security during web installation.'])
@@ -80,6 +127,14 @@ class InstallController extends Controller
             return back()
                 ->withErrors(['db_host' => 'Could not connect to the database. Check your credentials and try again.'])
                 ->withInput($request->except('db_password'));
+        }
+
+        if (! $this->installer->isRequestAuthorized($request)) {
+            if (! is_string($setupToken) || ! $this->installer->consumeSetupToken($setupToken)) {
+                return back()
+                    ->withErrors(['setup_token' => 'Installer setup authorization token could not be verified.'])
+                    ->withInput($request->except('db_password'));
+            }
         }
 
         try {
@@ -96,6 +151,7 @@ class InstallController extends Controller
         }
 
         $request->session()->regenerate();
+        $request->session()->forget('installer.setup_token');
         $request->session()->put('installer.database_configured', true);
         $request->session()->put('installer.setup_authorized', true);
 

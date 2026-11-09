@@ -3,6 +3,7 @@ name: Build Production Package
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
     inputs:
       version:
@@ -301,9 +302,9 @@ jobs:
           TEST_PACKAGE=package-hosting/upi-gateway-production.zip python3 tests/Hosting/verify_mysql_installer.py
 
   publish-release:
-    name: Publish Rolling Production Release
+    name: Publish Production Releases
     needs: [build, verify-hosting]
-    if: github.ref == 'refs/heads/main' && needs.build.outputs.is_custom_version == 'false'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -321,11 +322,13 @@ jobs:
           name: upi-gateway-main-${{ needs.build.outputs.short_sha }}
           path: package-dist
 
-      - name: Re-verify package integrity and publish rolling release
+      - name: Re-verify package integrity and publish releases
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRIGGER_SHA: ${{ github.sha }}
           SHORT_SHA: ${{ needs.build.outputs.short_sha }}
+          PKG_VERSION: ${{ needs.build.outputs.pkg_version }}
+          IS_CUSTOM_VERSION: ${{ needs.build.outputs.is_custom_version }}
           TAG_NAME: "latest-main"
         run: |
           set -euo pipefail
@@ -341,7 +344,7 @@ jobs:
 
           # Prepare release notes markdown
           cat << 'EOF' > release-notes.md
-          ## 🚀 UPI Gateway — Latest Main Production Build
+          ## 🚀 UPI Gateway — Production Build
 
           This is an automated, production-ready distribution package generated directly from commit `__TRIGGER_SHA__` (`__SHORT_SHA__`) on the `main` branch.
 
@@ -393,6 +396,35 @@ jobs:
             echo "Main branch production distribution is already synchronized."
           fi
 
+          # ── 1. Publish Immutable Versioned Release (C6) ─────────────────────────
+          if [[ "${GITHUB_REF:-}" =~ ^refs/tags/v ]]; then
+            IMMUTABLE_TAG="${GITHUB_REF#refs/tags/}"
+          elif [ "${IS_CUSTOM_VERSION:-false}" = "true" ]; then
+            IMMUTABLE_TAG="${PKG_VERSION}"
+          elif EXACT_TAG="$(git describe --tags --exact-match 2>/dev/null)" && [[ "${EXACT_TAG}" =~ ^v ]]; then
+            IMMUTABLE_TAG="${EXACT_TAG}"
+          else
+            IMMUTABLE_TAG="v1.1.0-${SHORT_SHA}"
+          fi
+          echo "Target immutable release tag: ${IMMUTABLE_TAG}"
+
+          if ! gh release view "${IMMUTABLE_TAG}" >/dev/null 2>&1; then
+            echo "Creating immutable release ${IMMUTABLE_TAG}..."
+            git tag "${IMMUTABLE_TAG}" "${TRIGGER_SHA}" || true
+            git push origin "${IMMUTABLE_TAG}" || true
+            gh release create "${IMMUTABLE_TAG}" \
+              --title "UPI Gateway — ${IMMUTABLE_TAG}" \
+              --notes-file release-notes.md \
+              --target "${TRIGGER_SHA}" || true
+            gh release upload "${IMMUTABLE_TAG}" \
+              "package-dist/upi-gateway-production.zip.sha256" \
+              "package-dist/upi-gateway-production.zip" || true
+            echo "Immutable release ${IMMUTABLE_TAG} published successfully."
+          else
+            echo "Immutable release ${IMMUTABLE_TAG} already exists. Preserving release immutability."
+          fi
+
+          # ── 2. Publish or Update Rolling Release (latest-main) ──────────────────
           # Update or create the rolling Git tag pointing to TRIGGER_SHA
           echo "Updating Git tag ${TAG_NAME} to commit ${TRIGGER_SHA}..."
           git tag -f "${TAG_NAME}" "${TRIGGER_SHA}"
@@ -465,4 +497,4 @@ jobs:
           rm -rf release-verify
           echo "Integrity verified: Published release package matches SHA-256 checksum."
 
-          echo "Rolling release published successfully."
+          echo "Releases published successfully."

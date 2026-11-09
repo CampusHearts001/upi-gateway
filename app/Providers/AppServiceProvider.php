@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Models\PaymentAccount;
 use App\Policies\PaymentAccountPolicy;
+use App\Support\DeploymentUrl;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
@@ -33,9 +34,14 @@ class AppServiceProvider extends ServiceProvider
             if (config('database.default') !== 'mysql') {
                 throw new RuntimeException('Production requires a MySQL database connection.');
             }
-            URL::useOrigin(config('app.url'));
-            URL::useAssetOrigin(config('app.asset_url') ?: config('app.url'));
-            URL::forceScheme('https');
+            $appUrl = (string) config('app.url');
+            URL::useOrigin($appUrl);
+            URL::useAssetOrigin(config('app.asset_url') ?: $appUrl);
+
+            // Enforce HTTPS in production; allow HTTP only on localhost loopback
+            if (str_starts_with(strtolower($appUrl), 'https://') || ! DeploymentUrl::isLocalUrl($appUrl)) {
+                URL::forceScheme('https');
+            }
         }
 
         // Named rate limiters are not registered here because the API throttle

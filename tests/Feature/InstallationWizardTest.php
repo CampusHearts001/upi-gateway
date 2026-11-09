@@ -62,7 +62,7 @@ class InstallationWizardTest extends TestCase
         $this->get('/')->assertRedirect(route('install.index'));
         $this->get(route('install.index'))
             ->assertOk()
-            ->assertSee('Installation readiness')
+            ->assertSee('Readiness')
             ->assertSee('Checking...')
             ->assertDontSee('PDO MySQL (required)')
             ->assertDontSee('PDO SQLite')
@@ -112,7 +112,7 @@ class InstallationWizardTest extends TestCase
 
         $this->get(route('install.done'))
             ->assertOk()
-            ->assertSee('Installation Complete')
+            ->assertSee('Setup complete')
             ->assertSee('Go to Login');
 
         $this->get(route('install.index'))->assertRedirect(route('home'));
@@ -296,7 +296,7 @@ class InstallationWizardTest extends TestCase
 
         $this->get(route('install.admin'))
             ->assertOk()
-            ->assertSee('Create Admin Account');
+            ->assertSee('Create your admin account');
 
         $this->get('/dashboard')->assertRedirect(route('install.index'));
     }

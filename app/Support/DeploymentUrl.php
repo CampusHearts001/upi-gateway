@@ -14,19 +14,39 @@ class DeploymentUrl
         if (preg_match('~/(?:install(?:\\.php)?(?:/(?:database|migrate|admin|done))?|index\\.php)/?$~i', $requestPath)) {
             $installerPath = preg_replace('~/(?:install(?:\\.php)?(?:/(?:database|migrate|admin|done))?|index\\.php)/?$~i', '', $requestPath);
         }
+
+        $clean = static function (string $path): string {
+            $path = preg_replace('~/public/?$~i', '', rtrim($path, '/'));
+
+            return $path === '.' || $path === '/' ? '' : rtrim($path, '/');
+        };
+
         $mount = null;
-        foreach (['SCRIPT_NAME', 'ORIG_SCRIPT_NAME'] as $key) {
+        foreach (['SCRIPT_NAME', 'ORIG_SCRIPT_NAME', 'PHP_SELF'] as $key) {
             $script = str_replace('\\', '/', (string) ($server[$key] ?? ''));
             if (preg_match('~/(?:index|install)\\.php(?:/.*)?$~i', $script)) {
                 $mount = preg_replace('~/(?:index|install)\\.php(?:/.*)?$~i', '', $script);
                 break;
             }
         }
-        $clean = static function (string $path): string {
-            $path = preg_replace('~/public/?$~i', '', rtrim($path, '/'));
 
-            return $path === '.' || $path === '/' ? '' : rtrim($path, '/');
-        };
+        // When SCRIPT_NAME and PHP_SELF are missing, infer from SCRIPT_FILENAME and DOCUMENT_ROOT
+        if ($mount === null && ! empty($server['DOCUMENT_ROOT']) && ! empty($server['SCRIPT_FILENAME'])) {
+            $docRoot = str_replace('\\', '/', rtrim((string) $server['DOCUMENT_ROOT'], '/'));
+            $scriptFile = str_replace('\\', '/', (string) $server['SCRIPT_FILENAME']);
+            if (str_starts_with($scriptFile, $docRoot)) {
+                $relativeScript = substr($scriptFile, strlen($docRoot));
+                if (preg_match('~/(?:index|install)\\.php(?:/.*)?$~i', $relativeScript)) {
+                    $mount = preg_replace('~/(?:index|install)\\.php(?:/.*)?$~i', '', $relativeScript);
+                }
+            }
+        }
+
+        // Check CONTEXT_PREFIX from Apache mod_alias / cPanel / LiteSpeed
+        if ($mount === null && ! empty($server['CONTEXT_PREFIX'])) {
+            $mount = (string) $server['CONTEXT_PREFIX'];
+        }
+
         $mount = $mount !== null ? $clean($mount) : null;
         // A panel may report /index.php despite a prefixed installer URL. Use
         // the explicit installer path as corroboration, never a forwarded prefix.
@@ -34,7 +54,15 @@ class DeploymentUrl
             return $clean($installerPath);
         }
 
-        return $mount ?? $clean($requestPath);
+        if ($mount !== null) {
+            return $mount;
+        }
+
+        if ($installerPath !== null) {
+            return $clean($installerPath);
+        }
+
+        return '';
     }
 
     public static function normalize(string $url): string
@@ -67,5 +95,42 @@ class DeploymentUrl
     public static function isPrivateRequest(string $relativePath): bool
     {
         return (bool) preg_match('~^/(?:\.|deployment-private-check\.txt(?:/|$)|(?:app|bootstrap|config|database|resources|routes|vendor|tests|scripts)(?:/|$)|storage/(?:app|framework|logs)(?:/|$)|docs/.+)~i', rawurldecode($relativePath));
+    }
+
+    public static function isLocalUrl(string $url): bool
+    {
+        $parts = parse_url(trim($url));
+        $host = strtolower(trim((string) ($parts['host'] ?? ''), '[]'));
+        if ($host === '') {
+            return false;
+        }
+
+        if (in_array($host, ['localhost', '127.0.0.1', '::1', 'localhost.localdomain'], true)) {
+            return true;
+        }
+
+        if (str_ends_with($host, '.localhost') || str_ends_with($host, '.test')) {
+            return true;
+        }
+
+        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return str_starts_with($host, '127.');
+        }
+
+        return false;
+    }
+
+    public static function isAllowedProductionUrl(string $url): bool
+    {
+        $normalized = strtolower(trim($url));
+        if (str_starts_with($normalized, 'https://')) {
+            return true;
+        }
+
+        if (str_starts_with($normalized, 'http://')) {
+            return self::isLocalUrl($url);
+        }
+
+        return false;
     }
 }

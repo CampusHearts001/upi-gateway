@@ -193,6 +193,14 @@ class DeploymentCompatibilityTest extends TestCase
             [['SCRIPT_NAME' => '/public/install.php', 'REQUEST_URI' => '/payment/install'], '/payment'],
             [['SCRIPT_NAME' => '/payment/index.php', 'REQUEST_URI' => '/payment/docs'], '/payment'],
             [['SCRIPT_NAME' => '/archive-main/public/install.php', 'REQUEST_URI' => '/archive-main/public/install.php'], '/archive-main'],
+            // C9: SCRIPT_NAME is missing edge cases
+            [['PHP_SELF' => '/sub/public/index.php', 'REQUEST_URI' => '/sub/orders'], '/sub'],
+            [['DOCUMENT_ROOT' => '/var/www/html', 'SCRIPT_FILENAME' => '/var/www/html/gateway/public/index.php', 'REQUEST_URI' => '/gateway/login'], '/gateway'],
+            [['CONTEXT_PREFIX' => '/pay', 'REQUEST_URI' => '/pay/dashboard'], '/pay'],
+            [['DOCUMENT_ROOT' => '/var/www/public', 'SCRIPT_FILENAME' => '/var/www/public/index.php', 'REQUEST_URI' => '/login'], ''],
+            [['REQUEST_URI' => '/'], ''],
+            [['REQUEST_URI' => '/my-store/install.php'], '/my-store'],
+            [['REQUEST_URI' => '/my-store/install/database'], '/my-store'],
         ];
         foreach ($cases as [$server, $expected]) {
             $this->assertSame($expected, DeploymentUrl::basePath($server));

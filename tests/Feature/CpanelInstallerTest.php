@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Support\DeploymentUrl;
 use App\Support\InstallationManager;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
 use Illuminate\Support\Facades\DB;
@@ -18,8 +19,10 @@ class CpanelInstallerTest extends TestCase
 
     private function removeInstallationMarker(): void
     {
+        $_SESSION = [];
         @unlink(config('installer.installed_path', storage_path('installed')));
         @unlink(base_path('storage/installed'));
+        @unlink(config('installer.setup_token_path', storage_path('installer-setup-token')));
     }
 
     // ── 1. Requirements & PHP Extensions ─────────────────────────────────────
@@ -42,6 +45,7 @@ class CpanelInstallerTest extends TestCase
         $this->assertContains('XML Extension', $names);
         $this->assertContains('Ctype Extension', $names);
         $this->assertContains('BCMath Extension', $names);
+        $this->assertContains('Iconv Extension', $names);
         $this->assertContains('storage/ writable', $names);
         $this->assertContains('bootstrap/cache/ writable', $names);
         $this->assertContains('.env writable', $names);
@@ -50,6 +54,7 @@ class CpanelInstallerTest extends TestCase
 
         $this->assertTrue($installer->allRequirementsPassed());
         $this->assertFalse($installer->allRequirementsPassed(['PHP-FPM execution' => false]));
+        $this->assertFalse($installer->allRequirementsPassed(['Iconv Extension' => false]));
     }
 
     public function test_missing_php_extension_is_detected_and_blocks_requirements_pass(): void
@@ -778,7 +783,7 @@ class CpanelInstallerTest extends TestCase
         // 1. Requirements page renders without setup password prompt
         $reqPage = $this->get('/install');
         $reqPage->assertOk();
-        $reqPage->assertSee('Installation readiness');
+        $reqPage->assertSee('Readiness');
         $reqPage->assertSee('Checking...');
         $reqPage->assertSee('Next');
         $reqPage->assertDontSee('PHP-FPM address');
@@ -789,7 +794,7 @@ class CpanelInstallerTest extends TestCase
         // 2. Database page is accessible directly without HTTP 401 or Basic Auth
         $dbPage = $this->get('/install/database');
         $dbPage->assertOk();
-        $dbPage->assertSee('Database Setup');
+        $dbPage->assertSee('Database');
         $dbPage->assertDontSee('Setup Authentication');
         $dbPage->assertDontSee('setup_token');
         $dbPage->assertDontSee('Setup Password');
@@ -827,7 +832,7 @@ class CpanelInstallerTest extends TestCase
             // Database setup page remains accessible for retry
             $retryPage = $this->get('/install/database');
             $retryPage->assertOk();
-            $retryPage->assertSee('Database Setup');
+            $retryPage->assertSee('Database');
         } finally {
             @unlink($envPath);
             @unlink($progressPath);
@@ -1064,5 +1069,545 @@ class CpanelInstallerTest extends TestCase
             proc_terminate($process, 9);
             proc_close($process);
         }
+    }
+
+    // ── 15. PHP Handler Compatibility & Server-Side Readiness (A1 & B1) ─────
+
+    public function test_php_handler_detection_supports_fpm_and_cli(): void
+    {
+        $fpm = InstallationManager::detectPhpHandler('fpm-fcgi');
+        $this->assertSame('fpm-fcgi', $fpm['sapi']);
+        $this->assertSame('PHP-FPM', $fpm['name']);
+        $this->assertSame('supported', $fpm['status']);
+        $this->assertTrue($fpm['supported']);
+        $this->assertStringContainsString('verified', $fpm['message']);
+
+        $cli = InstallationManager::detectPhpHandler('cli');
+        $this->assertSame('CLI', $cli['name']);
+        $this->assertSame('supported', $cli['status']);
+        $this->assertTrue($cli['supported']);
+
+        $cliServer = InstallationManager::detectPhpHandler('cli-server');
+        $this->assertSame('PHP Built-in Server', $cliServer['name']);
+        $this->assertSame('supported', $cliServer['status']);
+        $this->assertTrue($cliServer['supported']);
+    }
+
+    public function test_php_handler_detection_distinguishes_compatible_unsupported_and_unknown_handlers(): void
+    {
+        // LiteSpeed LSAPI: recognized as compatible web handler without claiming untested live hosting compatibility
+        $lsapi = InstallationManager::detectPhpHandler('litespeed');
+        $this->assertSame('litespeed', $lsapi['sapi']);
+        $this->assertSame('LiteSpeed SAPI (LSAPI)', $lsapi['name']);
+        $this->assertSame('compatible', $lsapi['status']);
+        $this->assertTrue($lsapi['supported']);
+        $this->assertStringNotContainsString('verified', strtolower($lsapi['message']));
+
+        // CGI/FastCGI
+        $fastcgi = InstallationManager::detectPhpHandler('cgi-fcgi');
+        $this->assertSame('compatible', $fastcgi['status']);
+        $this->assertTrue($fastcgi['supported']);
+
+        // Apache mod_php
+        $modPhp = InstallationManager::detectPhpHandler('apache2handler');
+        $this->assertSame('compatible', $modPhp['status']);
+        $this->assertTrue($modPhp['supported']);
+
+        // Unsupported handlers
+        $phpdbg = InstallationManager::detectPhpHandler('phpdbg');
+        $this->assertSame('unsupported', $phpdbg['status']);
+        $this->assertFalse($phpdbg['supported']);
+
+        $embed = InstallationManager::detectPhpHandler('embed');
+        $this->assertSame('unsupported', $embed['status']);
+        $this->assertFalse($embed['supported']);
+
+        $rawCgi = InstallationManager::detectPhpHandler('cgi');
+        $this->assertSame('unsupported', $rawCgi['status']);
+        $this->assertFalse($rawCgi['supported']);
+
+        // Unknown handlers
+        $unknown = InstallationManager::detectPhpHandler('custom_handler_v2');
+        $this->assertSame('unknown', $unknown['status']);
+        $this->assertFalse($unknown['supported']);
+    }
+
+    public function test_verify_server_readiness_blocks_unsupported_or_unknown_handler(): void
+    {
+        $installer = app(InstallationManager::class);
+
+        $resultUnsupported = $installer->verifyServerReadiness(['PHP_SAPI' => 'phpdbg']);
+        $this->assertFalse($resultUnsupported['ready']);
+        $this->assertSame('php_handler', $resultUnsupported['reason']);
+        $this->assertStringContainsString('not supported', $resultUnsupported['message']);
+        $this->assertStringNotContainsString(base_path(), $resultUnsupported['message']);
+
+        $resultUnknown = $installer->verifyServerReadiness(['PHP_SAPI' => 'mystery_sapi']);
+        $this->assertFalse($resultUnknown['ready']);
+        $this->assertSame('php_handler', $resultUnknown['reason']);
+        $this->assertStringContainsString('Unrecognized PHP handler', $resultUnknown['message']);
+        $this->assertStringNotContainsString(base_path(), $resultUnknown['message']);
+    }
+
+    public function test_verify_server_readiness_blocks_insecure_nginx_root_exposure(): void
+    {
+        $installer = app(InstallationManager::class);
+
+        // Simulation: DocumentRoot points directly to base_path() under Nginx
+        $result = $installer->verifyServerReadiness([
+            'PHP_SAPI' => 'fpm-fcgi',
+            'SERVER_SOFTWARE' => 'nginx/1.24.0',
+            'DOCUMENT_ROOT' => base_path(),
+            'HTTP_HOST' => 'example.com',
+            'REQUEST_URI' => '/',
+        ]);
+
+        $this->assertFalse($result['ready']);
+        $this->assertSame('nginx_root_exposure', $result['reason']);
+        $this->assertStringContainsString('Nginx document root must point to the public directory', $result['message']);
+        $this->assertStringNotContainsString(base_path(), $result['message']);
+    }
+
+    public function test_direct_database_step_access_without_readiness_is_blocked_and_redirected(): void
+    {
+        $this->removeInstallationMarker();
+        unset($_SESSION['_installer_readiness_passed']);
+
+        // Direct GET access to ?step=database without completing readiness must redirect to requirements
+        $response = $this->get('/install.php?step=database');
+        $response->assertStatus(302);
+        $response->assertRedirect('/install.php?step=requirements');
+    }
+
+    public function test_direct_database_post_bypass_attempt_is_rejected_with_403(): void
+    {
+        $this->removeInstallationMarker();
+        $this->get('/install.php')->assertOk();
+        $csrf = $_SESSION['_installer_csrf'];
+
+        // Tamper session to ensure readiness flag is absent
+        unset($_SESSION['_installer_readiness_passed']);
+
+        $tempEnv = sys_get_temp_dir().'/bypass_test_env_'.bin2hex(random_bytes(6));
+        config(['installer.env_path' => $tempEnv]);
+
+        $originalMethod = $_SERVER['REQUEST_METHOD'] ?? null;
+        $originalPost = $_POST;
+        $originalGet = $_GET;
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        $_GET['step'] = 'database';
+        $_POST = [
+            '_token' => $csrf,
+            'db_host' => '127.0.0.1',
+            'db_port' => 3306,
+            'db_database' => 'test_db',
+            'db_username' => 'test_user',
+            'db_password' => 'test_pass',
+            'app_name' => 'Bypass Test',
+            'app_url' => 'https://example.com',
+        ];
+
+        try {
+            $response = $this->post('/install.php?step=database', $_POST);
+            $response->assertStatus(403);
+            $response->assertSee('Server readiness verification must be completed before database setup.');
+            $this->assertFileDoesNotExist($tempEnv);
+        } finally {
+            $_POST = $originalPost;
+            $_GET = $originalGet;
+            if ($originalMethod === null) {
+                unset($_SERVER['REQUEST_METHOD']);
+            } else {
+                $_SERVER['REQUEST_METHOD'] = $originalMethod;
+            }
+            @unlink($tempEnv);
+        }
+    }
+
+    public function test_valid_installation_flow_allows_database_step_after_readiness(): void
+    {
+        $this->removeInstallationMarker();
+
+        // Step 1: Render requirements
+        $response = $this->get('/install.php');
+        $response->assertOk();
+        $csrf = $_SESSION['_installer_csrf'];
+
+        // Step 2: Deployment check POST
+        $checkResponse = $this->post('/install.php?step=deployment-check', [
+            '_token' => $csrf,
+        ]);
+        $checkResponse->assertOk();
+        $checkResponse->assertJson(['session' => true, 'csrf' => true, 'ready' => true]);
+        $this->assertTrue($_SESSION['_installer_readiness_passed']);
+
+        // Step 3: Now navigate to database step
+        $dbResponse = $this->get('/install.php?step=database');
+        $dbResponse->assertOk();
+        $dbResponse->assertSee('Database');
+    }
+
+    // ── 16. HTTP/HTTPS Installation & Remote DB Validation (B2 & B3) ────────
+
+    public function test_insecure_http_url_for_non_localhost_is_rejected(): void
+    {
+        $this->removeInstallationMarker();
+        $this->withSession(['installer.readiness_passed' => true]);
+
+        // 1. Blade route rejection
+        $response = $this->from('/install/database')->post('/install/database', [
+            'db_connection' => 'mysql',
+            'db_host' => '127.0.0.1',
+            'db_port' => 3306,
+            'db_database' => 'gateway_db',
+            'db_username' => 'gateway_user',
+            'db_password' => 'secret',
+            'app_url' => 'http://insecure-domain.example.com',
+            'app_name' => 'Insecure Test',
+        ]);
+
+        $response->assertRedirect('/install/database');
+        $response->assertSessionHasErrors('app_url');
+        $errors = session('errors')->get('app_url');
+        $this->assertStringContainsString('Production installations must use HTTPS', $errors[0]);
+
+        // 2. install.php rejection
+        $this->get('/install.php')->assertOk();
+        $csrf = $_SESSION['_installer_csrf'];
+        $_SESSION['_installer_readiness_passed'] = true;
+
+        $originalMethod = $_SERVER['REQUEST_METHOD'] ?? null;
+        $originalPost = $_POST;
+        $originalGet = $_GET;
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        $_GET['step'] = 'database';
+        $_POST = [
+            '_token' => $csrf,
+            'db_host' => '127.0.0.1',
+            'db_port' => 3306,
+            'db_database' => 'gateway_db',
+            'db_username' => 'gateway_user',
+            'db_password' => 'secret',
+            'app_name' => 'Insecure Test',
+            'app_url' => 'http://insecure-domain.example.com',
+        ];
+
+        try {
+            $phpResponse = $this->post('/install.php?step=database', $_POST);
+            $phpResponse->assertOk();
+            $phpResponse->assertSee('Production installations must use HTTPS');
+        } finally {
+            $_POST = $originalPost;
+            $_GET = $originalGet;
+            if ($originalMethod === null) {
+                unset($_SERVER['REQUEST_METHOD']);
+            } else {
+                $_SERVER['REQUEST_METHOD'] = $originalMethod;
+            }
+        }
+    }
+
+    public function test_localhost_http_url_is_accepted_for_local_installations(): void
+    {
+        $this->assertTrue(DeploymentUrl::isLocalUrl('http://localhost:8000'));
+        $this->assertTrue(DeploymentUrl::isLocalUrl('http://127.0.0.1:8080'));
+        $this->assertTrue(DeploymentUrl::isLocalUrl('http://127.0.0.2:3000'));
+        $this->assertTrue(DeploymentUrl::isLocalUrl('http://[::1]:8080'));
+        $this->assertTrue(DeploymentUrl::isLocalUrl('http://app.test'));
+        $this->assertTrue(DeploymentUrl::isLocalUrl('http://gateway.localhost'));
+
+        $this->assertFalse(DeploymentUrl::isLocalUrl('http://example.com'));
+        $this->assertFalse(DeploymentUrl::isLocalUrl('http://198.51.100.1'));
+
+        $this->assertTrue(DeploymentUrl::isAllowedProductionUrl('https://payments.example.com'));
+        $this->assertTrue(DeploymentUrl::isAllowedProductionUrl('http://127.0.0.1:8080'));
+        $this->assertFalse(DeploymentUrl::isAllowedProductionUrl('http://insecure.example.com'));
+    }
+
+    public function test_remote_database_host_validation_paths(): void
+    {
+        $installer = app(InstallationManager::class);
+
+        // When remote DB is disabled (default)
+        config(['installer.allow_remote_db' => false]);
+        putenv('INSTALLER_ALLOW_REMOTE_DB=false');
+        $this->assertTrue($installer->isAllowedDatabaseHost('127.0.0.1'));
+        $this->assertTrue($installer->isAllowedDatabaseHost('localhost'));
+        $this->assertFalse($installer->isAllowedDatabaseHost('198.51.100.5'));
+        $this->assertFalse($installer->isAllowedDatabaseHost('rds.amazonaws.com'));
+
+        // When remote DB is enabled
+        config(['installer.allow_remote_db' => true]);
+        $this->assertTrue($installer->isAllowedDatabaseHost('127.0.0.1'));
+        $this->assertTrue($installer->isAllowedDatabaseHost('198.51.100.5'));
+        $this->assertTrue($installer->isAllowedDatabaseHost('rds.ap-south-1.amazonaws.com'));
+        $this->assertTrue($installer->isAllowedDatabaseHost('db.internal'));
+
+        // Dangerous / invalid remote hosts must still be rejected
+        $this->assertFalse($installer->isAllowedDatabaseHost('rds.amazonaws.com; DROP TABLE users;'));
+        $this->assertFalse($installer->isAllowedDatabaseHost("db.internal' OR '1'='1"));
+        $this->assertFalse($installer->isAllowedDatabaseHost('10.0.0.1 space'));
+        $this->assertFalse($installer->isAllowedDatabaseHost(''));
+
+        // Reset
+        config(['installer.allow_remote_db' => false]);
+        putenv('INSTALLER_ALLOW_REMOTE_DB');
+    }
+
+    // ── 17. Security Hardening Tests (C1, C2, C4, C8) ──────────────────────────
+
+    public function test_setup_token_validation_and_replay_protection(): void
+    {
+        $this->removeInstallationMarker();
+        $installer = app(InstallationManager::class);
+
+        $token = $installer->ensureSetupToken();
+        $this->assertNotEmpty($token);
+        $this->assertSame(64, strlen($token));
+        $this->assertTrue($installer->validSetupToken($token));
+        $this->assertFalse($installer->validSetupToken('invalid-token-value'));
+        $this->assertFalse($installer->validSetupToken(null));
+
+        // Consuming the token rotates it and invalidates previous token
+        $consumed = $installer->consumeSetupToken($token);
+        $this->assertTrue($consumed);
+        $this->assertFalse($installer->validSetupToken($token));
+        $this->assertFalse($installer->consumeSetupToken($token));
+
+        // In HTTP flow, submitting with invalid or already-consumed token is rejected
+        $this->withSession(['installer.expect_token_rejection' => true]);
+        $response = $this->from('/install/database')->post('/install/database', [
+            'setup_token' => $token,
+            'db_connection' => 'mysql',
+            'db_host' => '127.0.0.1',
+            'db_port' => 3306,
+            'db_database' => 'gateway_db',
+            'db_username' => 'gateway_user',
+            'db_password' => 'secret',
+            'app_url' => 'https://gateway.example',
+            'app_name' => 'Gateway',
+        ]);
+        $response->assertRedirect('/install/database');
+        $response->assertSessionHasErrors('setup_token');
+    }
+
+    public function test_concurrent_installer_attempts_are_serialized_and_rejected(): void
+    {
+        $this->removeInstallationMarker();
+        $installer = app(InstallationManager::class);
+
+        $sharedToken = $installer->ensureSetupToken();
+        $this->assertTrue($installer->validSetupToken($sharedToken));
+
+        // Simulating racer 1 consuming token successfully
+        $racer1Result = $installer->consumeSetupToken($sharedToken);
+        $this->assertTrue($racer1Result);
+
+        // Racer 2 attempting with the same initial token must fail
+        $racer2Result = $installer->consumeSetupToken($sharedToken);
+        $this->assertFalse($racer2Result);
+    }
+
+    public function test_lock_file_permission_failure_and_recovery(): void
+    {
+        $this->removeInstallationMarker();
+        $lockPath = storage_path('framework/testing/perm-test-lock-'.bin2hex(random_bytes(6)));
+        config(['installer.setup_lock_path' => $lockPath]);
+        $installer = app(InstallationManager::class);
+
+        try {
+            // Case 1: Unsafe loose permissions (0644) are recovered to 0600 gracefully
+            file_put_contents($lockPath, 'test-lock');
+            chmod($lockPath, 0644);
+            $this->assertSame(0644, fileperms($lockPath) & 0777);
+
+            $executed = $installer->withSetupLock(function () use ($lockPath) {
+                return (fileperms($lockPath) & 0777) === 0600;
+            });
+            $this->assertTrue($executed);
+            $this->assertSame(0600, fileperms($lockPath) & 0777);
+
+            // Case 2: Unsafe symlink cannot be safely recovered; must throw without leaking paths
+            @unlink($lockPath);
+            $symlinkTarget = sys_get_temp_dir().'/symlink-target-'.bin2hex(random_bytes(6));
+            file_put_contents($symlinkTarget, 'target');
+            symlink($symlinkTarget, $lockPath);
+
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('Installer lock file is unsafe.');
+
+            try {
+                $installer->withSetupLock(fn () => true);
+            } catch (RuntimeException $e) {
+                // Ensure no server directory paths leaked in exception message
+                $this->assertStringNotContainsString(base_path(), $e->getMessage());
+                $this->assertStringNotContainsString(storage_path(), $e->getMessage());
+                $this->assertStringNotContainsString($symlinkTarget, $e->getMessage());
+                throw $e;
+            } finally {
+                @unlink($symlinkTarget);
+            }
+        } finally {
+            @unlink($lockPath);
+        }
+    }
+
+    public function test_diagnostic_endpoint_abuse_and_log_injection_protection(): void
+    {
+        $this->removeInstallationMarker();
+        $installer = app(InstallationManager::class);
+
+        // 1. Log sanitization: CRLF, ANSI escape sequences, control chars must be stripped
+        $dirtyMessage = "Readiness failed\r\n injected_header: true\n\x1b[31mCRITICAL\x1b[0m\x00evil";
+        Log::shouldReceive('warning')
+            ->once()
+            ->withArgs(function (string $message, array $context) {
+                return $message === 'Installer browser readiness check failed'
+                    && ! str_contains($context['message'], "\r")
+                    && ! str_contains($context['message'], "\n")
+                    && ! str_contains($context['message'], "\x1b")
+                    && ! str_contains($context['message'], "\x00");
+            });
+
+        $diag = $this->getJson('/__upi_deployment_check')->assertOk()->json();
+        $token = $diag['diagnostic_token'];
+
+        $this->postJson('/__upi_deployment_check', [
+            'diagnostic_report' => true,
+            'diagnostic_token' => $token,
+            'stage' => 'public_directory',
+            'message' => $dirtyMessage,
+        ])->assertOk()->assertJson(['logged' => true]);
+
+        // 2. Replay of single-use diagnostic token must be rejected
+        $this->postJson('/__upi_deployment_check', [
+            'diagnostic_report' => true,
+            'diagnostic_token' => $token,
+            'stage' => 'public_directory',
+            'message' => 'Replay attempt',
+        ])->assertForbidden();
+
+        // 3. When application is marked installed, diagnostic POST must be rejected (403)
+        $installer->markInstalled();
+        $this->postJson('/__upi_deployment_check', [
+            'diagnostic_report' => true,
+            'diagnostic_token' => 'any-token',
+            'stage' => 'server',
+            'message' => 'Post-install probe',
+        ])->assertForbidden();
+    }
+
+    public function test_post_install_permission_hardening(): void
+    {
+        $this->removeInstallationMarker();
+        $installer = app(InstallationManager::class);
+
+        // Create temporary installer artifacts
+        $tokenFile = $installer->setupTokenPath();
+        file_put_contents($tokenFile, bin2hex(random_bytes(32)).':'.(time() + 3600));
+        chmod($tokenFile, 0600);
+        $tempEnv = dirname($installer->envPath()).'/.env-install-test-'.bin2hex(random_bytes(4));
+        file_put_contents($tempEnv, 'TMP=1');
+
+        $this->assertFileExists($tokenFile);
+        $this->assertFileExists($tempEnv);
+
+        // Mark installed
+        $installer->markInstalled();
+
+        // 1. Temporary installer tokens and temp env files must be unlinked
+        $this->assertFileDoesNotExist($tokenFile);
+        $this->assertFileDoesNotExist($tempEnv);
+
+        // 2. Sensitive installation marker and .env must have private permissions (0600)
+        $installedPath = $installer->installedPath();
+        $this->assertFileExists($installedPath);
+        $this->assertSame(0600, fileperms($installedPath) & 0777);
+
+        if (is_file($installer->envPath())) {
+            $this->assertSame(0600, fileperms($installer->envPath()) & 0777);
+        }
+
+        // 3. Storage and runtime cache directories must remain intact and writable
+        $this->assertDirectoryIsWritable(storage_path('logs'));
+        $this->assertDirectoryIsWritable(storage_path('framework/cache'));
+        $this->assertDirectoryIsWritable(storage_path('framework/sessions'));
+        $this->assertDirectoryIsWritable(storage_path('framework/views'));
+        $this->assertDirectoryIsWritable(base_path('bootstrap/cache'));
+    }
+
+    public function test_private_file_ownership_and_symlink_validation(): void
+    {
+        $installer = app(InstallationManager::class);
+        $tempPath = storage_path('framework/testing/owner-test-'.bin2hex(random_bytes(6)));
+
+        try {
+            // Regular 0600 file owned by current process is valid
+            file_put_contents($tempPath, 'secret');
+            chmod($tempPath, 0600);
+            clearstatcache(true, $tempPath);
+            $this->assertTrue($installer->privateFileIsValid($tempPath));
+
+            // Symlink pointing to regular file is always rejected as unsafe
+            $symlinkPath = storage_path('framework/testing/owner-link-'.bin2hex(random_bytes(6)));
+            symlink($tempPath, $symlinkPath);
+            try {
+                $this->assertFalse($installer->privateFileIsValid($symlinkPath));
+            } finally {
+                @unlink($symlinkPath);
+            }
+
+            // Loose permissions (0644) are not valid as a private file
+            chmod($tempPath, 0644);
+            clearstatcache(true, $tempPath);
+            $this->assertFalse($installer->privateFileIsValid($tempPath));
+
+            // Incomplete setup recovery works on 0644 regular file
+            config(['installer.in_progress_path' => $tempPath]);
+            $this->assertTrue($installer->hasIncompleteSetup());
+            $this->assertSame(0600, fileperms($tempPath) & 0777);
+        } finally {
+            @unlink($tempPath);
+        }
+    }
+
+    public function test_shared_database_config_validation(): void
+    {
+        $installer = app(InstallationManager::class);
+
+        // Valid local MySQL configuration
+        $validData = [
+            'db_connection' => 'mysql',
+            'db_host' => '127.0.0.1',
+            'db_port' => 3306,
+            'db_database' => 'gateway_prod',
+            'db_username' => 'gateway_user',
+            'db_password' => 'secret_pass_123',
+            'app_name' => 'Payment Gateway',
+            'app_url' => 'https://pay.example.com',
+        ];
+        $this->assertNull($installer->validateDatabaseConfig($validData));
+
+        // Invalid host
+        $this->assertSame('Invalid database host.', $installer->validateDatabaseConfig(['db_host' => ''] + $validData));
+        $this->assertSame('Database host must be local (127.0.0.1 or localhost) for security during web installation.', $installer->validateDatabaseConfig(['db_host' => '192.168.1.5'] + $validData));
+
+        // Invalid port
+        $this->assertSame('Database port must be between 1 and 65535.', $installer->validateDatabaseConfig(['db_port' => 70000] + $validData));
+
+        // Invalid database name
+        $this->assertSame('Database name contains invalid characters.', $installer->validateDatabaseConfig(['db_database' => 'drop table;'] + $validData));
+
+        // Password with newline
+        $this->assertSame('Database password cannot contain newlines.', $installer->validateDatabaseConfig(['db_password' => "pass\nword"] + $validData));
+
+        // Invalid URL
+        $this->assertSame('Please enter a valid application URL (e.g. https://yourdomain.com).', $installer->validateDatabaseConfig(['app_url' => 'not-a-url'] + $validData));
+
+        // Insecure HTTP URL on production domain
+        $this->assertSame('Production installations must use HTTPS (e.g. https://yourdomain.com). Insecure HTTP is only permitted for local testing on 127.0.0.1 or localhost.', $installer->validateDatabaseConfig(['app_url' => 'http://pay.example.com'] + $validData));
+
+        // Insecure HTTP on localhost is permitted
+        $this->assertNull($installer->validateDatabaseConfig(['app_url' => 'http://127.0.0.1:8080'] + $validData));
     }
 }

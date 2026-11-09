@@ -1,6 +1,7 @@
 <?php
 
 use App\Support\DeploymentUrl;
+use App\Support\InstallationManager;
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Request;
 
@@ -90,9 +91,18 @@ if (DeploymentUrl::isPrivateRequest(substr($deploymentRequestPath, strlen($deplo
     return;
 }
 if (! is_file(__DIR__.'/../storage/installed') && $deploymentRequestPath === $deploymentBasePath.'/__upi_deployment_check') {
+    require_once __DIR__.'/../vendor/autoload.php';
+    $handler = InstallationManager::detectPhpHandler();
     header('Content-Type: application/json');
     header('Cache-Control: no-store');
-    echo json_encode(['application' => 'upi-gateway', 'routing' => true, 'runtime' => 'installer', 'base_path' => $deploymentBasePath, 'php_fpm' => PHP_SAPI === 'fpm-fcgi']);
+    echo json_encode([
+        'application' => 'upi-gateway',
+        'routing' => true,
+        'runtime' => 'installer',
+        'base_path' => $deploymentBasePath,
+        'php_fpm' => PHP_SAPI === 'fpm-fcgi',
+        'php_handler' => $handler,
+    ]);
 
     return;
 }

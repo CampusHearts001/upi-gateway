@@ -39,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const serverReady = @json($serverReady);
     const nativeInstaller = @json($nativeInstaller);
     const installerCsrf = @json($deploymentCsrfToken ?? csrf_token());
+    const installerDiagToken = @json($deploymentDiagnosticToken ?? (function_exists('session') ? session('installer.diagnostic_token') : null) ?? '');
     const panel = document.querySelector('[data-installer-readiness]');
     const output = panel.querySelector('[data-hosting-result]');
     const message = panel.querySelector('[data-hosting-message]');
@@ -65,15 +66,16 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     let routing = null;
     const reportFailure = async (stage, error) => {
-        if (!nativeInstaller && !routing?.diagnostic_token) return;
+        const diagToken = nativeInstaller ? installerDiagToken : routing?.diagnostic_token;
+        if (!diagToken) return;
         const endpoint = nativeInstaller ? 'install.php?step=deployment-check' : '__upi_deployment_check';
         const parameters = new URLSearchParams({
             _token: installerCsrf,
             diagnostic_report: '1',
+            diagnostic_token: diagToken,
             stage,
             message: String(error?.message || 'Unknown readiness failure').slice(0, 500),
         });
-        if (!nativeInstaller) parameters.set('diagnostic_token', routing.diagnostic_token);
         try { await fetchAt(endpoint, {method: 'POST', body: parameters}); } catch (_) {}
     };
     const check = async () => {
@@ -91,7 +93,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const route = await fetchAt('__upi_deployment_check');
             routing = route.ok ? await route.json() : null;
             if (!routing || routing.application !== 'upi-gateway' || routing.routing !== true) throw new Error('The application routing probe failed.');
-            if (routing.php_fpm !== true) throw new Error('The request is not executing through PHP-FPM.');
+            const handler = routing.php_handler || {
+                status: routing.php_fpm ? 'supported' : 'unknown',
+                supported: routing.php_fpm === true,
+                name: routing.php_fpm ? 'PHP-FPM' : 'Unknown',
+            };
+            if (!handler.supported) {
+                if (handler.status === 'unsupported') {
+                    throw new Error('The detected PHP handler (' + (handler.name || 'unsupported') + ') is not supported.');
+                }
+                throw new Error('Unrecognized PHP handler (' + (handler.name || 'unknown') + '). PHP-FPM or a compatible handler is required.');
+            }
             if (new URL(base).protocol === 'https:' && routing.runtime === 'laravel' && !routing.secure) throw new Error('HTTPS was not detected behind the configured proxy.');
             const prefix = new URL(base).pathname.replace(/\/$/, '');
             if (routing.base_path !== prefix) throw new Error('The application URL prefix does not match the PHP mount.');

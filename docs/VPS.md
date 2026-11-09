@@ -33,6 +33,28 @@ FLUSH PRIVILEGES;
 EXIT;
 ```
 
+### Remote or Managed MySQL Database (e.g. AWS RDS, DigitalOcean)
+
+By default, the web installation wizard strictly restricts database connections to local loopback addresses (`127.0.0.1` or `localhost`) to prevent SSRF and database credential exfiltration during web setup.
+
+To use an external or cloud-managed database server, configure `INSTALLER_ALLOW_REMOTE_DB=true` before opening the installation wizard:
+
+1. **Option A: Pre-configure `.env` (Recommended):**
+   ```bash
+   echo "INSTALLER_ALLOW_REMOTE_DB=true" > /var/www/upi-gateway/.env
+   sudo chown www-data:www-data /var/www/upi-gateway/.env
+   sudo chmod 600 /var/www/upi-gateway/.env
+   ```
+
+2. **Option B: PHP-FPM Pool Environment:**
+   In your PHP-FPM pool configuration (e.g. `/etc/php/8.2/fpm/pool.d/www.conf`):
+   ```ini
+   env[INSTALLER_ALLOW_REMOTE_DB] = true
+   ```
+   Then reload PHP-FPM: `sudo systemctl reload php8.2-fpm`.
+
+Once enabled, you can enter your remote database hostname or IP (e.g. `db.internal`, `rds.ap-south-1.amazonaws.com`, or private VPC IP) in the wizard. Remote hosts must be valid domain names or IP addresses; injection characters, quotes, and whitespace are rejected.
+
 ## 3. Place the application
 
 Upload or clone the release into `/var/www/upi-gateway`. If dependencies are not bundled, run `composer install --no-dev --prefer-dist --optimize-autoloader` before changing ownership. The deployed project must contain `vendor/autoload.php` and `public/build`.
@@ -75,7 +97,7 @@ Issue a TLS certificate with the approved certificate tooling before production 
 
 For a TLS-terminating reverse proxy, set `APP_URL=https://your-domain.example` and `TRUSTED_PROXIES` to the comma-separated IP addresses or CIDR ranges of proxies that connect directly to PHP (for example, `10.0.0.5`). Never use `*`. At the public edge, replace client-supplied `X-Forwarded-For` and `X-Forwarded-Proto` with the verified client address and scheme; pass those headers only through trusted internal proxies. Restrict origin access to those proxies. For Cloudflare, use its current published proxy IP ranges and keep them updated; do not trust `CF-Connecting-IP` or client-supplied forwarded headers directly. Production payment URLs use the canonical `APP_URL` host and HTTPS. Verify HSTS on a public HTTPS response after deployment.
 
-The browser installation wizard is passwordless, secure, and straightforward. On first access, inspect requirements and proceed directly to database setup. The database setup screen requires only your standard MySQL credentials without manual tokens or passwords. For security, database connections must be local (`127.0.0.1` or `localhost`). Successful installation automatically locks the installer.
+The browser installation wizard is passwordless, secure, and straightforward. On first access, inspect requirements and proceed directly to database setup. The database setup screen requires only your standard MySQL credentials without manual tokens or passwords. For security, database connections must be local (`127.0.0.1` or `localhost`) by default, or set `INSTALLER_ALLOW_REMOTE_DB=true` before running the wizard if using an external database. Successful installation automatically locks the installer.
 
 ## 5. Run the web wizard
 

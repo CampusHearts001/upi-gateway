@@ -31,10 +31,15 @@ Route::get('/__upi_deployment_check', function (Request $request, InstallationMa
         'base_path' => rtrim((string) parse_url(config('app.url'), PHP_URL_PATH), '/'),
         'cookie_path' => config('session.path'), 'csrf_token' => csrf_token(), 'probe' => $probe, 'diagnostic_token' => $diagnosticToken,
         'secure' => $request->isSecure(), 'php_fpm' => PHP_SAPI === 'fpm-fcgi',
+        'php_handler' => $installer->detectPhpHandler(),
         'login_url' => route('login'), 'dashboard_url' => route('dashboard'), 'installed' => $installer->isInstalled(),
     ])->header('Cache-Control', 'no-store');
 });
-Route::post('/__upi_deployment_check', function (Request $request) {
+Route::post('/__upi_deployment_check', function (Request $request, InstallationManager $installer) {
+    if ($installer->isInstalled()) {
+        abort(403, 'Application is already installed.');
+    }
+
     if ($request->boolean('diagnostic_report')) {
         abort_unless(is_string($request->input('diagnostic_token'))
             && hash_equals((string) $request->session()->pull('deployment.diagnostic'), $request->input('diagnostic_token')), 403);
@@ -42,9 +47,11 @@ Route::post('/__upi_deployment_check', function (Request $request) {
             'stage' => ['required', 'string', 'max:40', 'regex:/^[a-z_]+$/'],
             'message' => ['required', 'string', 'max:500'],
         ]);
+        $sanitizedMessage = preg_replace('/(?:\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f])/', ' ', $data['message']);
+        $sanitizedMessage = trim(preg_replace('/\s+/', ' ', (string) $sanitizedMessage));
         Log::warning('Installer browser readiness check failed', [
             'stage' => $data['stage'],
-            'message' => $data['message'],
+            'message' => mb_substr($sanitizedMessage, 0, 500),
             'url_prefix' => rtrim((string) parse_url(config('app.url'), PHP_URL_PATH), '/'),
         ]);
 
@@ -59,6 +66,8 @@ Route::post('/__upi_deployment_check', function (Request $request) {
 // ── Installer ─────────────────────────────────────────────────────────────────
 Route::any('/install.php', function () {
     http_response_code(200);
+    $GLOBALS['__installer_location'] = null;
+    @header_remove();
     ob_start();
     try {
         require base_path('install.php');
@@ -66,8 +75,21 @@ Route::any('/install.php', function () {
         $content = (string) ob_get_clean();
     }
     $code = http_response_code() ?: 200;
+    if (! empty($GLOBALS['__installer_location'])) {
+        return redirect($GLOBALS['__installer_location'], $code === 200 ? 302 : $code);
+    }
+    $response = response($content, $code);
+    foreach (headers_list() as $header) {
+        if (str_contains($header, ': ')) {
+            [$name, $value] = explode(': ', $header, 2);
+            if (in_array(strtolower($name), ['location', 'content-type', 'cache-control'], true)) {
+                $response->header($name, $value);
+            }
+        }
+    }
+    @header_remove();
 
-    return response($content, $code);
+    return $response;
 })->name('install.php');
 
 Route::middleware(RedirectIfInstalled::class)->prefix('install')->name('install.')->group(function () {

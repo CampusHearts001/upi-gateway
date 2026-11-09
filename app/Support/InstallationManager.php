@@ -59,12 +59,19 @@ class InstallationManager
 
     public function ensureSetupState(): void
     {
-        if (is_file($this->installedPath()) || (is_file($this->envPath()) && ! $this->hasIncompleteSetup())) {
+        if ($this->isInstalled()) {
             return;
         }
         $this->withSetupLock(function (): void {
+            if ($this->isInstalled()) {
+                return;
+            }
             if (! is_file($this->envPath()) && ! $this->hasIncompleteSetup()) {
                 $this->createPrivateFile($this->inProgressPath(), bin2hex(random_bytes(32)));
+            }
+            $record = $this->readTokenRecord();
+            if ($record === null || $record['expires'] <= time()) {
+                $this->writeTokenRecord();
             }
         });
     }
@@ -94,7 +101,27 @@ class InstallationManager
             return true;
         }
 
-        return (bool) config('installer.allow_remote_db', false);
+        $allowRemote = (bool) config('installer.allow_remote_db', false);
+        if (! $allowRemote) {
+            $envVal = getenv('INSTALLER_ALLOW_REMOTE_DB')
+                ?: ($_ENV['INSTALLER_ALLOW_REMOTE_DB'] ?? ($_SERVER['INSTALLER_ALLOW_REMOTE_DB'] ?? false));
+            $allowRemote = filter_var($envVal, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        if (! $allowRemote) {
+            return false;
+        }
+
+        $normalized = trim($host);
+        if ($normalized === '' || preg_match('/[\s\r\n\'"<>;&|`$]/', $normalized)) {
+            return false;
+        }
+
+        if (filter_var($normalized, FILTER_VALIDATE_IP)) {
+            return true;
+        }
+
+        return (bool) preg_match('/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/', $normalized);
     }
 
     public function ipInRange(string $ip, string $range): bool
@@ -291,6 +318,7 @@ class InstallationManager
             'application_path' => base_path(),
             'php_version' => PHP_VERSION,
             'php_sapi' => PHP_SAPI,
+            'php_handler' => self::detectPhpHandler($server['PHP_SAPI'] ?? PHP_SAPI),
             'layout' => $isSubdirectory ? 'Subdirectory' : 'Domain or subdomain (same public-only mapping)',
             'wrapper_warning' => (bool) preg_match('/-(?:main|master|v?\d[\w.-]*)$/i', basename(base_path())),
             'rewrite_module' => function_exists('apache_get_modules') ? (in_array('mod_rewrite', apache_get_modules(), true) ? 'PASS' : 'FAIL') : 'NOT CHECKED',
@@ -314,7 +342,13 @@ class InstallationManager
 
     public function hasIncompleteSetup(): bool
     {
-        return $this->privateFileIsValid($this->inProgressPath());
+        $path = $this->inProgressPath();
+        if (! $this->privateFileIsValid($path) && is_file($path) && ! is_link($path)) {
+            @chmod($path, 0600);
+            clearstatcache(true, $path);
+        }
+
+        return $this->privateFileIsValid($path);
     }
 
     private function inProgressPath(): string
@@ -345,7 +379,7 @@ class InstallationManager
         }
     }
 
-    private function privateFileIsValid(string $path): bool
+    public function privateFileIsValid(string $path): bool
     {
         if (is_link($path) || ! is_file($path)) {
             return false;
@@ -356,17 +390,137 @@ class InstallationManager
             && (! function_exists('posix_geteuid') || $stat['uid'] === posix_geteuid());
     }
 
-    private function withSetupLock(callable $callback): mixed
+    public function setupTokenPath(): string
     {
-        $path = config('installer.setup_lock_path');
+        return config('installer.setup_token_path', storage_path('installer-setup-token'));
+    }
+
+    private function readTokenRecord(): ?array
+    {
+        $path = $this->setupTokenPath();
+        if (! $this->privateFileIsValid($path)) {
+            if (is_file($path) && ! is_link($path)) {
+                @chmod($path, 0600);
+                clearstatcache(true, $path);
+            }
+            if (! $this->privateFileIsValid($path)) {
+                return null;
+            }
+        }
+        $content = (string) @file_get_contents($path);
+        $parts = explode(':', $content, 2);
+        if (count($parts) !== 2 || ! preg_match('/^[a-f0-9]{64}$/', $parts[0]) || ! ctype_digit($parts[1])) {
+            return null;
+        }
+
+        return ['token' => $parts[0], 'expires' => (int) $parts[1]];
+    }
+
+    private function writeTokenRecord(): string
+    {
+        $ttl = (int) config('installer.setup_token_ttl', 3600);
+        if ($ttl < 1) {
+            $ttl = 3600;
+        }
+        $token = bin2hex(random_bytes(32));
+        $contents = $token.':'.(time() + $ttl);
+        $path = $this->setupTokenPath();
+        if (file_exists($path) || is_link($path)) {
+            if (is_file($path) && ! is_link($path)) {
+                @chmod($path, 0600);
+                clearstatcache(true, $path);
+            }
+            if (! $this->privateFileIsValid($path)) {
+                @unlink($path);
+            }
+        }
+        if (file_exists($path)) {
+            $temporary = $path.'.'.bin2hex(random_bytes(8));
+            $this->createPrivateFile($temporary, $contents);
+            if (! rename($temporary, $path)) {
+                @unlink($temporary);
+                throw new RuntimeException('Installer token could not be rotated.');
+            }
+        } else {
+            $this->createPrivateFile($path, $contents);
+        }
+
+        return $token;
+    }
+
+    public function ensureSetupToken(): string
+    {
+        if ($this->isInstalled()) {
+            return '';
+        }
+
+        return $this->withSetupLock(function (): string {
+            $record = $this->readTokenRecord();
+            if ($record === null || $record['expires'] <= time()) {
+                return $this->writeTokenRecord();
+            }
+
+            return $record['token'];
+        });
+    }
+
+    public function getSetupToken(): ?string
+    {
+        $record = $this->readTokenRecord();
+        if ($record !== null && $record['expires'] > time()) {
+            return $record['token'];
+        }
+
+        return null;
+    }
+
+    public function validSetupToken(?string $token): bool
+    {
+        if (! is_string($token) || ! preg_match('/^[a-f0-9]{64}$/', $token)) {
+            return false;
+        }
+
+        $record = $this->readTokenRecord();
+
+        return $record !== null && $record['expires'] > time() && hash_equals($record['token'], $token);
+    }
+
+    public function consumeSetupToken(?string $token): bool
+    {
+        return $this->withSetupLock(function () use ($token): bool {
+            if ($this->isInstalled()) {
+                return false;
+            }
+            if (! $this->validSetupToken($token)) {
+                return false;
+            }
+            $this->writeTokenRecord();
+
+            return true;
+        });
+    }
+
+    public function withSetupLock(callable $callback): mixed
+    {
+        $path = config('installer.setup_lock_path', storage_path('installer-setup-lock'));
         if (file_exists($path) || is_link($path)) {
             if (! $this->privateFileIsValid($path)) {
-                throw new RuntimeException('Installer lock file is unsafe.');
+                if (is_file($path) && ! is_link($path)) {
+                    @chmod($path, 0600);
+                    clearstatcache(true, $path);
+                }
+                if (! $this->privateFileIsValid($path)) {
+                    throw new RuntimeException('Installer lock file is unsafe.');
+                }
             }
         } else {
             try {
                 $this->createPrivateFile($path, '');
             } catch (RuntimeException $e) {
+                if (is_file($path) && ! is_link($path)) {
+                    @chmod($path, 0600);
+                    clearstatcache(true, $path);
+                }
                 if (! $this->privateFileIsValid($path)) {
                     throw $e;
                 }
@@ -438,6 +592,192 @@ class InstallationManager
     }
 
     /**
+     * Detect and classify PHP handler (SAPI) compatibility.
+     *
+     * Distinguishes supported (verified), compatible (alternative web handlers),
+     * unsupported, and unknown handlers without claiming untested compatibility.
+     *
+     * @return array{sapi: string, name: string, status: string, supported: bool, message: string}
+     */
+    public static function detectPhpHandler(?string $sapi = null): array
+    {
+        $sapi = strtolower($sapi ?? PHP_SAPI);
+
+        // Fully supported and verified execution handlers
+        $supported = [
+            'fpm-fcgi' => [
+                'name' => 'PHP-FPM',
+                'status' => 'supported',
+                'supported' => true,
+                'message' => 'PHP-FPM execution verified.',
+            ],
+            'cli' => [
+                'name' => 'CLI',
+                'status' => 'supported',
+                'supported' => true,
+                'message' => 'Command line execution.',
+            ],
+            'cli-server' => [
+                'name' => 'PHP Built-in Server',
+                'status' => 'supported',
+                'supported' => true,
+                'message' => 'Development server execution.',
+            ],
+        ];
+
+        if (isset($supported[$sapi])) {
+            return array_merge(['sapi' => $sapi], $supported[$sapi]);
+        }
+
+        // Known alternative web handlers: functional for web execution without claiming verified status
+        $compatible = [
+            'litespeed' => [
+                'name' => 'LiteSpeed SAPI (LSAPI)',
+                'status' => 'compatible',
+                'supported' => true,
+                'message' => 'LiteSpeed LSAPI detected.',
+            ],
+            'cgi-fcgi' => [
+                'name' => 'CGI/FastCGI',
+                'status' => 'compatible',
+                'supported' => true,
+                'message' => 'FastCGI execution detected.',
+            ],
+            'apache2handler' => [
+                'name' => 'Apache 2.0 Handler (mod_php)',
+                'status' => 'compatible',
+                'supported' => true,
+                'message' => 'Apache mod_php execution detected.',
+            ],
+        ];
+
+        if (isset($compatible[$sapi])) {
+            return array_merge(['sapi' => $sapi], $compatible[$sapi]);
+        }
+
+        // Known unsupported handlers
+        $unsupported = [
+            'phpdbg' => 'PHP Debugger (phpdbg)',
+            'embed' => 'Embedded PHP',
+            'cgi' => 'Raw CGI (non-FastCGI)',
+        ];
+
+        if (isset($unsupported[$sapi])) {
+            return [
+                'sapi' => $sapi,
+                'name' => $unsupported[$sapi],
+                'status' => 'unsupported',
+                'supported' => false,
+                'message' => "The PHP handler '{$sapi}' is not supported for web hosting.",
+            ];
+        }
+
+        // Unknown / unrecognized handler
+        return [
+            'sapi' => $sapi,
+            'name' => 'Unknown Handler ('.$sapi.')',
+            'status' => 'unknown',
+            'supported' => false,
+            'message' => "Unrecognized PHP handler '{$sapi}'.",
+        ];
+    }
+
+    /**
+     * Enforce server-side readiness and document-root security.
+     *
+     * Validates that:
+     * 1. System requirements and writable paths are satisfied.
+     * 2. PHP handler is supported or compatible.
+     * 3. Document root and web layout do not expose application-private files.
+     *
+     * Returns a safe, user-facing error message without exposing filesystem paths.
+     *
+     * @return array{ready: bool, reason: ?string, message: string, handler: array}
+     */
+    public function verifyServerReadiness(array $server = []): array
+    {
+        $server = ! empty($server) ? $server : ($_SERVER ?? []);
+        $handler = self::detectPhpHandler($server['PHP_SAPI'] ?? PHP_SAPI);
+
+        // 1. PHP Handler check
+        if (! $handler['supported']) {
+            return [
+                'ready' => false,
+                'reason' => 'php_handler',
+                'message' => $handler['status'] === 'unsupported'
+                    ? "The current PHP handler ({$handler['name']}) is not supported."
+                    : 'Unrecognized PHP handler. PHP-FPM or a compatible handler is required.',
+                'handler' => $handler,
+            ];
+        }
+
+        // 2. System and directory requirements check
+        if (! $this->allRequirementsPassed()) {
+            return [
+                'ready' => false,
+                'reason' => 'requirements',
+                'message' => 'Server readiness requirements are not met. Ensure required PHP extensions and writable directories are available.',
+                'handler' => $handler,
+            ];
+        }
+
+        // 3. Document Root and Private File Protection
+        $rawSoftware = (string) ($server['SERVER_SOFTWARE'] ?? '');
+        $softwareLower = strtolower($rawSoftware);
+        $isNginx = str_contains($softwareLower, 'nginx');
+
+        $documentRoot = str_replace('\\', '/', (string) ($server['DOCUMENT_ROOT'] ?? ''));
+        $publicPath = realpath(public_path());
+        $basePath = realpath(base_path());
+        $docRootReal = realpath($documentRoot);
+        $docRootIsPublic = $docRootReal !== false && $publicPath !== false && $docRootReal === $publicPath;
+
+        // Ensure private files are not inside public/
+        if ($publicPath !== false && (is_file($publicPath.'/.env') || is_file($publicPath.'/composer.json'))) {
+            return [
+                'ready' => false,
+                'reason' => 'public_directory',
+                'message' => 'The public directory layout is invalid. Application-private files must not be placed directly in the web root.',
+                'handler' => $handler,
+            ];
+        }
+
+        // If DocumentRoot is set and is NOT public/
+        $handlerSapi = strtolower($server['PHP_SAPI'] ?? PHP_SAPI);
+        if ($documentRoot !== '' && ! $docRootIsPublic && $handlerSapi !== 'cli' && $handlerSapi !== 'cli-server') {
+            $urlParts = parse_url($this->detectApplicationUrl(null, $server));
+            $isSubdirectory = trim((string) ($urlParts['path'] ?? ''), '/') !== '';
+
+            // On Apache / LiteSpeed, root and public .htaccess must exist for private file protection
+            if (! is_file(base_path('.htaccess')) || ! is_file(public_path('.htaccess'))) {
+                return [
+                    'ready' => false,
+                    'reason' => 'htaccess_missing',
+                    'message' => 'Web server configuration files (.htaccess) are missing. Ensure hidden files were extracted properly.',
+                    'handler' => $handler,
+                ];
+            }
+
+            // On Nginx, if DocumentRoot points directly to the project root on a main domain without public mapping
+            if ($isNginx && ! $isSubdirectory && $basePath !== false && $docRootReal === $basePath) {
+                return [
+                    'ready' => false,
+                    'reason' => 'nginx_root_exposure',
+                    'message' => 'Nginx document root must point to the public directory to prevent private file exposure.',
+                    'handler' => $handler,
+                ];
+            }
+        }
+
+        return [
+            'ready' => true,
+            'reason' => null,
+            'message' => 'Server readiness verified.',
+            'handler' => $handler,
+        ];
+    }
+
+    /**
      * Inspect system and directory requirements for browser/cPanel installation.
      *
      * @param  array<string, bool>  $overrides
@@ -453,10 +793,11 @@ class InstallationManager
         $bootstrapCacheDir = base_path('bootstrap/cache');
         $envFile = $this->envPath();
         $envDir = dirname($envFile);
+        $handler = self::detectPhpHandler();
 
         $checks = [
             ['name' => 'PHP >= 8.2', 'required' => true, 'pass' => version_compare(PHP_VERSION, '8.2.0', '>=')],
-            ['name' => 'PHP-FPM execution', 'required' => true, 'pass' => PHP_SAPI === 'cli' || PHP_SAPI === 'fpm-fcgi'],
+            ['name' => 'PHP-FPM execution', 'required' => true, 'pass' => $handler['supported']],
             ['name' => 'PDO Extension', 'required' => true, 'pass' => extension_loaded('pdo')],
             ['name' => 'PDO MySQL (required)', 'required' => true, 'pass' => extension_loaded('pdo_mysql')],
             ['name' => 'OpenSSL Extension', 'required' => true, 'pass' => extension_loaded('openssl')],
@@ -468,6 +809,7 @@ class InstallationManager
             ['name' => 'XML Extension', 'required' => true, 'pass' => extension_loaded('xml')],
             ['name' => 'Ctype Extension', 'required' => true, 'pass' => extension_loaded('ctype')],
             ['name' => 'BCMath Extension', 'required' => true, 'pass' => extension_loaded('bcmath')],
+            ['name' => 'Iconv Extension', 'required' => true, 'pass' => extension_loaded('iconv')],
             ['name' => 'storage/ writable', 'required' => true, 'pass' => is_dir($storageDir) && is_writable($storageDir)],
             ['name' => 'storage/framework/cache writable', 'required' => true, 'pass' => is_dir($cacheDir) && is_writable($cacheDir)],
             ['name' => 'storage/framework/sessions writable', 'required' => true, 'pass' => is_dir($sessionsDir) && is_writable($sessionsDir)],
@@ -486,6 +828,47 @@ class InstallationManager
         }
 
         return $checks;
+    }
+
+    public function validateDatabaseConfig(array $data): ?string
+    {
+        $dbHost = trim((string) ($data['db_host'] ?? ''));
+        $dbPort = (int) ($data['db_port'] ?? 0);
+        $dbDatabase = trim((string) ($data['db_database'] ?? ''));
+        $dbUsername = trim((string) ($data['db_username'] ?? ''));
+        $dbPassword = (string) ($data['db_password'] ?? '');
+        $appName = trim((string) ($data['app_name'] ?? ''));
+        $appUrl = rtrim(trim((string) ($data['app_url'] ?? '')), '/');
+
+        if ($dbHost === '' || preg_match('/[\r\n]/', $dbHost)) {
+            return 'Invalid database host.';
+        }
+        if (! $this->isAllowedDatabaseHost($dbHost)) {
+            return 'Database host must be local (127.0.0.1 or localhost) for security during web installation.';
+        }
+        if ($dbPort < 1 || $dbPort > 65535) {
+            return 'Database port must be between 1 and 65535.';
+        }
+        if ($dbDatabase === '' || ! preg_match('/^[A-Za-z0-9_$-]+$/', $dbDatabase)) {
+            return 'Database name contains invalid characters.';
+        }
+        if ($dbUsername === '' || preg_match('/[\r\n]/', $dbUsername)) {
+            return 'Invalid database username.';
+        }
+        if (preg_match('/[\r\n]/', $dbPassword)) {
+            return 'Database password cannot contain newlines.';
+        }
+        if ($appName === '' || preg_match('/[\r\n]/', $appName)) {
+            return 'Invalid application name.';
+        }
+        if ($appUrl === '' || ! filter_var($appUrl, FILTER_VALIDATE_URL)) {
+            return 'Please enter a valid application URL (e.g. https://yourdomain.com).';
+        }
+        if (! DeploymentUrl::isAllowedProductionUrl($appUrl)) {
+            return 'Production installations must use HTTPS (e.g. https://yourdomain.com). Insecure HTTP is only permitted for local testing on 127.0.0.1 or localhost.';
+        }
+
+        return null;
     }
 
     /**
@@ -592,6 +975,9 @@ class InstallationManager
     {
         $data['app_url'] = rtrim(trim($data['app_url']), '/');
         $data['app_url'] = DeploymentUrl::normalize($data['app_url']);
+        if (! DeploymentUrl::isAllowedProductionUrl($data['app_url'])) {
+            throw new InvalidArgumentException('Production installations must use HTTPS. Insecure HTTP is only permitted on 127.0.0.1 or localhost.');
+        }
         $path = $this->envPath();
         $template = base_path('.env.example');
         $env = is_file($path) ? file_get_contents($path) : file_get_contents($template);
@@ -692,9 +1078,20 @@ class InstallationManager
             @chmod($lockPath, 0600);
         }
 
+        if (is_file($this->envPath())) {
+            @chmod($this->envPath(), 0600);
+        }
+
         @unlink($this->inProgressPath());
+        @unlink($this->setupTokenPath());
         @unlink(storage_path('installer-setup-token'));
         @unlink(storage_path('installer-setup-password'));
+
+        foreach (glob(dirname($this->envPath()).'/.env-install-*') ?: [] as $tempFile) {
+            @unlink($tempFile);
+        }
+
+        DeploymentFilesystem::prepare(base_path());
     }
 
     public function installedPath(): string
