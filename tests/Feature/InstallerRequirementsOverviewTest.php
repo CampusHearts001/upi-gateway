@@ -3,7 +3,10 @@
 namespace Tests\Feature;
 
 use App\Support\InstallationManager;
+use App\Support\NativeInstallerSession;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use Tests\TestCase;
 
 class InstallerRequirementsOverviewTest extends TestCase
@@ -276,6 +279,58 @@ class InstallerRequirementsOverviewTest extends TestCase
         $nativeData = $nativeResponse->json();
         $this->assertFalse($nativeData['csrf']);
         $this->assertFalse($nativeData['ready']);
+
+        $missingTokenResponse = $this->post('/install.php?step=deployment-check', []);
+        $missingTokenResponse->assertStatus(403)->assertJson([
+            'session' => false,
+            'csrf' => false,
+            'ready' => false,
+        ]);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function test_native_installer_session_falls_back_to_private_storage_and_persists_csrf(): void
+    {
+        $temporaryRoot = sys_get_temp_dir().'/upi-installer-session-'.bin2hex(random_bytes(6));
+        $sessionsDirectory = $temporaryRoot.'/storage/framework/sessions';
+        mkdir($sessionsDirectory, 0700, true);
+        $unavailableSavePath = $temporaryRoot.'/missing-php-session-directory';
+        ini_set('session.save_path', $unavailableSavePath);
+
+        try {
+            $this->assertTrue(NativeInstallerSession::start($temporaryRoot, '/checkout', true));
+            $this->assertSame(realpath($sessionsDirectory), session_save_path());
+            $this->assertSame('upi_setup_'.substr(hash('sha256', $temporaryRoot.'/checkout'), 0, 16), session_name());
+            $this->assertSame('/checkout/', session_get_cookie_params()['path']);
+            $this->assertTrue(session_get_cookie_params()['secure']);
+            $this->assertTrue(session_get_cookie_params()['httponly']);
+            $this->assertSame('Lax', session_get_cookie_params()['samesite']);
+            $this->assertSame('', session_get_cookie_params()['domain']);
+
+            $csrf = bin2hex(random_bytes(32));
+            $_SESSION['_installer_csrf'] = $csrf;
+            $sessionId = session_id();
+            session_write_close();
+
+            session_id($sessionId);
+            $this->assertTrue(NativeInstallerSession::start($temporaryRoot, '/checkout', true));
+            $this->assertSame($csrf, $_SESSION['_installer_csrf']);
+            session_write_close();
+        } finally {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
+            session_id('');
+            $files = glob($sessionsDirectory.'/*') ?: [];
+            foreach ($files as $file) {
+                @unlink($file);
+            }
+            @rmdir($sessionsDirectory);
+            @rmdir(dirname($sessionsDirectory));
+            @rmdir(dirname(dirname($sessionsDirectory)));
+            @rmdir($temporaryRoot);
+        }
     }
 
     public function test_database_step_blocked_when_server_readiness_or_requirements_fail(): void

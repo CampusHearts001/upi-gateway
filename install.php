@@ -3,6 +3,7 @@
 use App\Support\DeploymentFilesystem;
 use App\Support\DeploymentUrl;
 use App\Support\InstallationManager;
+use App\Support\NativeInstallerSession;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\Artisan;
 
@@ -47,6 +48,7 @@ foreach ($runtimeDirectories as $runtimeDir) {
 }
 require_once $baseDir.'/app/Support/DeploymentUrl.php';
 require_once $baseDir.'/app/Support/DeploymentFilesystem.php';
+require_once $baseDir.'/app/Support/NativeInstallerSession.php';
 DeploymentFilesystem::prepare($baseDir);
 $installerBasePath = DeploymentUrl::basePath($_SERVER);
 $installerUrl = $installerBasePath.'/install.php';
@@ -190,15 +192,14 @@ if (! function_exists('installer_is_https')) {
 if (session_status() === PHP_SESSION_NONE) {
     $isHttps = installer_is_https($_SERVER);
 
-    session_name('upi_setup_'.substr(hash('sha256', $baseDir.$installerBasePath), 0, 16));
-    ini_set('session.cookie_httponly', '1');
-    ini_set('session.use_only_cookies', '1');
-    ini_set('session.use_strict_mode', '1');
-    ini_set('session.cookie_path', $installerBasePath.'/');
-    if ($isHttps) {
-        ini_set('session.cookie_secure', '1');
+    if (! NativeInstallerSession::start($baseDir, $installerBasePath, $isHttps)) {
+        error_log('[UPI Gateway installer] Native session could not be started with the configured or private application session storage.');
+        http_response_code(503);
+        header('Content-Type: text/html; charset=utf-8');
+        echo '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup unavailable</title></head><body><h1>Setup unavailable</h1><p>The installer could not start a secure session. Please verify the hosting account can write to the private storage/framework/sessions directory.</p></body></html>';
+
+        return;
     }
-    session_start();
 }
 
 if (empty($_SESSION['_installer_csrf'])) {
