@@ -34,7 +34,14 @@
 
 <script nonce="{{ $csp_nonce ?? '' }}">
 document.addEventListener('DOMContentLoaded', () => {
-    const base = @json(rtrim($deploymentUrl, '/'));
+    // Derive probe target origin strictly from the active browser origin
+    // (window.location.origin) while preserving any configured application
+    // subdirectory mount path. Host aliases (e.g. 127.0.0.1 vs localhost, custom
+    // ports, cPanel domains) must never turn same-site probes into cross-origin CORS requests.
+    const pageUrl = new URL(window.location.href);
+    const configuredBase = @json(rtrim($deploymentUrl ?? '', '/'));
+    const basePath = configuredBase ? new URL(configuredBase, pageUrl.origin).pathname.replace(/\/$/, '') : '';
+    const base = pageUrl.origin + basePath;
     const finalCheck = @json($finalCheck);
     const serverReady = @json($serverReady);
     const nativeInstaller = @json($nativeInstaller);
@@ -58,7 +65,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 : 'We’re making sure everything is ready.';
     };
     const fetchAt = (path, options = {}) => {
-        const target = new URL(base + '/' + path);
+        const cleanBase = base.replace(/\/$/, '');
+        const cleanPath = String(path || '').replace(/^\//, '');
+        const target = new URL(cleanBase + '/' + cleanPath, window.location.origin);
         target.searchParams.set('__upi_check', Date.now() + '-' + Math.random());
         return fetch(target, {
             cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(12000), ...options
@@ -132,7 +141,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const sessionResponse = await fetchAt(endpoint, {method: 'POST', body: parameters});
             const session = sessionResponse.ok ? await sessionResponse.json() : null;
             const cookiePath = native ? session?.cookie_path : routing.cookie_path;
-            if (!session || !session.session || !session.csrf || (cookiePath && cookiePath !== '/' && cookiePath !== prefix + '/')) throw new Error('The session or CSRF round-trip failed.');
+            const normalizeCookiePath = val => {
+                if (!val) return '/';
+                const p = '/' + String(val).replace(/^\/+|\/+$/g, '');
+                return p === '/' ? '/' : p + '/';
+            };
+            const normalizedCookie = normalizeCookiePath(cookiePath);
+            const normalizedExpected = normalizeCookiePath(prefix);
+            if (!session || !session.session || !session.csrf || (cookiePath && normalizedCookie !== '/' && normalizedCookie !== normalizedExpected)) throw new Error('The session or CSRF round-trip failed.');
             stage = 'application_urls';
             if (!native && routing.installed) {
                 if (routing.login_url !== base + '/login' || routing.dashboard_url !== base + '/dashboard') throw new Error('Generated application URLs do not match the public URL.');

@@ -365,7 +365,8 @@ $error = null;
 $success = null;
 
 $method = $_SERVER['REQUEST_METHOD'] ?? (function_exists('request') ? request()->method() : 'GET');
-$serverState = function_exists('request') && request() ? array_merge($_SERVER, request()->server()) : $_SERVER;
+$requestServer = function_exists('request') && request() ? (array) request()->server() : [];
+$serverState = $installer->serverState($_SERVER, $requestServer, PHP_SAPI);
 
 // Validate CSRF token on POST
 if ($method === 'POST') {

@@ -409,4 +409,248 @@ class InstallerRequirementsOverviewTest extends TestCase
         $this->assertStringContainsString('routing.installed && routing.base_path !== prefix', $rendered);
         $this->assertStringContainsString('routing.runtime !== \'laravel\'', $rendered);
     }
+
+    public function test_regression_same_origin_probes_derive_from_window_location_origin_on_127_0_0_1_8004(): void
+    {
+        $installer = app(InstallationManager::class);
+        $mockServer = [
+            'HTTP_HOST' => '127.0.0.1:8004',
+            'SERVER_PORT' => '8004',
+            'SERVER_NAME' => '127.0.0.1',
+            'REQUEST_URI' => '/install',
+        ];
+
+        $appUrl = $installer->detectApplicationUrl(null, $mockServer);
+        $this->assertSame('http://127.0.0.1:8004', $appUrl);
+
+        $rendered = view('install.hosting-check', [
+            'deploymentUrl' => $appUrl,
+            'serverReady' => true,
+            'nativeInstaller' => false,
+            'finalCheck' => false,
+        ])->render();
+
+        $this->assertStringContainsString('const pageUrl = new URL(window.location.href);', $rendered);
+        $this->assertStringContainsString('const base = pageUrl.origin + basePath;', $rendered);
+        $this->assertStringContainsString('new URL(cleanBase + \'/\' + cleanPath, window.location.origin)', $rendered);
+        $this->assertStringNotContainsString('http://localhost', $rendered);
+    }
+
+    public function test_regression_same_origin_probes_preserve_custom_port_on_localhost_9090(): void
+    {
+        $installer = app(InstallationManager::class);
+        $mockServer = [
+            'HTTP_HOST' => 'localhost:9090',
+            'SERVER_PORT' => '9090',
+            'SERVER_NAME' => 'localhost',
+            'REQUEST_URI' => '/install',
+        ];
+
+        $appUrl = $installer->detectApplicationUrl(null, $mockServer);
+        $this->assertSame('http://localhost:9090', $appUrl);
+
+        $rendered = view('install.hosting-check', [
+            'deploymentUrl' => $appUrl,
+            'serverReady' => true,
+            'nativeInstaller' => false,
+            'finalCheck' => false,
+        ])->render();
+
+        $this->assertStringContainsString('const base = pageUrl.origin + basePath;', $rendered);
+        $this->assertStringContainsString('credentials: \'same-origin\'', $rendered);
+    }
+
+    public function test_regression_cpanel_https_domain_preserves_https_origin_without_mixed_content(): void
+    {
+        $installer = app(InstallationManager::class);
+        $mockServer = [
+            'HTTP_HOST' => 'payments.merchant.example.com',
+            'HTTPS' => 'on',
+            'SERVER_PORT' => '443',
+            'SERVER_NAME' => 'payments.merchant.example.com',
+            'SERVER_SOFTWARE' => 'LiteSpeed',
+            'PHP_SAPI' => 'litespeed',
+            'DOCUMENT_ROOT' => public_path(),
+        ];
+
+        $appUrl = $installer->detectApplicationUrl(null, $mockServer);
+        $this->assertSame('https://payments.merchant.example.com', $appUrl);
+
+        $rendered = view('install.hosting-check', [
+            'deploymentUrl' => $appUrl,
+            'serverReady' => true,
+            'nativeInstaller' => true,
+            'finalCheck' => false,
+        ])->render();
+
+        $this->assertStringContainsString('pageUrl.origin + basePath', $rendered);
+        $this->assertStringContainsString('https:', $rendered);
+    }
+
+    public function test_regression_subdirectory_installation_preserves_path_prefix_and_cookie_path(): void
+    {
+        $installer = app(InstallationManager::class);
+        $mockServer = [
+            'HTTP_HOST' => 'merchant.example.com',
+            'SERVER_NAME' => 'merchant.example.com',
+            'SCRIPT_NAME' => '/payment-subfolder/public/index.php',
+            'REQUEST_URI' => '/payment-subfolder/install.php',
+            'DOCUMENT_ROOT' => dirname(public_path()),
+        ];
+
+        $appUrl = $installer->detectApplicationUrl(null, $mockServer);
+        $this->assertSame('http://merchant.example.com/payment-subfolder', $appUrl);
+
+        $rendered = view('install.hosting-check', [
+            'deploymentUrl' => $appUrl,
+            'serverReady' => true,
+            'nativeInstaller' => true,
+            'finalCheck' => false,
+        ])->render();
+
+        $this->assertStringContainsString('basePath = configuredBase ? new URL(configuredBase, pageUrl.origin).pathname.replace(/\/$/, \'\') : \'\';', $rendered);
+        $this->assertStringContainsString('normalizeCookiePath', $rendered);
+    }
+
+    public function test_regression_native_install_php_mode_executes_deployment_check(): void
+    {
+        $this->get('/install.php?step=requirements')->assertOk();
+        $csrf = $_SESSION['_installer_csrf'] ?? '';
+        $this->assertNotEmpty($csrf);
+
+        $response = $this->post('/install.php?step=deployment-check', [
+            '_token' => $csrf,
+            'recheck' => '1',
+        ]);
+        $response->assertOk();
+        $data = $response->json();
+
+        $this->assertTrue($data['session']);
+        $this->assertTrue($data['csrf']);
+        $this->assertTrue($data['ready']);
+        $this->assertCount(29, $data['requirements']);
+        $this->assertSame(29, $data['summary']['total']);
+        $this->assertSame(0, $data['summary']['failed']);
+    }
+
+    public function test_regression_laravel_installer_mode_renders_same_origin_and_all_29_checks(): void
+    {
+        $response = $this->get('/install');
+        $response->assertOk();
+        $content = $response->getContent();
+
+        $this->assertStringContainsString('pageUrl.origin + basePath', $content);
+        $this->assertStringContainsString('data-stat="total">29<', $content);
+        $this->assertStringContainsString('data-stat="failed">0<', $content);
+        $this->assertStringContainsString('System Ready for Installation', $content);
+    }
+
+    public function test_regression_preservation_of_http_host_and_https_after_laravel_bootstrap(): void
+    {
+        $installer = app(InstallationManager::class);
+        $webServer = [
+            'HTTP_HOST' => 'real-cpanel-merchant.example.com:8443',
+            'SERVER_NAME' => 'real-cpanel-merchant.example.com',
+            'HTTPS' => 'on',
+            'SERVER_PORT' => '8443',
+            'DOCUMENT_ROOT' => '/home/merchant/public',
+            'SCRIPT_NAME' => '/gateway/public/index.php',
+            'REQUEST_URI' => '/gateway/install.php?step=requirements',
+        ];
+        $cliRequestDefaults = [
+            'HTTP_HOST' => 'localhost',
+            'SERVER_NAME' => 'localhost',
+            'HTTPS' => '',
+            'SERVER_PORT' => '80',
+            'DOCUMENT_ROOT' => '/project/public',
+            'SCRIPT_NAME' => '/install.php',
+            'REQUEST_URI' => '/install.php?step=requirements',
+        ];
+        $serverState = $installer->serverState($webServer, $cliRequestDefaults, 'fpm-fcgi');
+
+        $this->assertSame($webServer, array_intersect_key($serverState, $webServer));
+        $detected = $installer->detectApplicationUrl(null, $serverState);
+        $this->assertSame('https://real-cpanel-merchant.example.com:8443/gateway', $detected);
+    }
+
+    public function test_regression_all_29_checks_passing_renders_next_button_and_unhiding_script(): void
+    {
+        $installer = app(InstallationManager::class);
+        $overview = $installer->getRequirementsOverview();
+
+        $this->assertSame(29, $overview['summary']['total']);
+        $this->assertSame(0, $overview['summary']['failed']);
+        $this->assertTrue($overview['allPassed']);
+
+        $view = view('install.requirements-overview', [
+            'overview' => $overview,
+            'summary' => $overview['summary'],
+            'groups' => $overview['groups'],
+            'requirements' => $overview['requirements'],
+            'allPassed' => true,
+            'nativeInstaller' => false,
+            'nextUrl' => '/install/database',
+            'recheckUrl' => '/install/recheck',
+            'csrfToken' => 'test-csrf-token',
+        ])->render();
+
+        $this->assertStringContainsString('System Ready for Installation', $view);
+        $this->assertStringContainsString('data-deployment-continue', $view);
+        $this->assertStringContainsString('data-deployment-href="/install/database"', $view);
+        $this->assertStringContainsString('Next: Database Setup', $view);
+
+        $checkView = view('install.hosting-check', [
+            'deploymentUrl' => 'http://127.0.0.1:8004',
+            'serverReady' => true,
+            'nativeInstaller' => false,
+            'finalCheck' => false,
+        ])->render();
+
+        $this->assertStringContainsString('link.hidden = false;', $checkView);
+        $this->assertStringContainsString('link.removeAttribute(\'aria-disabled\');', $checkView);
+        $this->assertStringContainsString('setStatus(\'ready\');', $checkView);
+    }
+
+    public function test_regression_clicking_next_opens_database_configuration(): void
+    {
+        $installer = app(InstallationManager::class);
+        $mockServer = [
+            'DOCUMENT_ROOT' => public_path(),
+            'PHP_SAPI' => 'fpm-fcgi',
+            'HTTP_HOST' => '127.0.0.1:8004',
+        ];
+
+        // 1. Direct navigation in Laravel mode
+        $laravelResponse = $this->call('GET', '/install/database', [], [], [], $mockServer);
+        $laravelResponse->assertOk();
+        $laravelResponse->assertViewIs('install.database');
+        $this->assertStringContainsString('Connect your database', $laravelResponse->getContent());
+        $this->assertStringContainsString('name="db_host"', $laravelResponse->getContent());
+        $this->assertStringContainsString('name="db_database"', $laravelResponse->getContent());
+        $this->assertStringContainsString('name="db_username"', $laravelResponse->getContent());
+
+        // 2. Direct navigation in native install.php mode
+        $nativeResponse = $this->call('GET', '/install.php?step=database', [], [], [], $mockServer);
+        $nativeResponse->assertOk();
+        $this->assertStringContainsString('Database Configuration', $nativeResponse->getContent());
+        $this->assertStringContainsString('name="db_host"', $nativeResponse->getContent());
+        $this->assertStringContainsString('name="db_database"', $nativeResponse->getContent());
+    }
+
+    public function test_regression_mandatory_requirement_failure_blocks_database_progression(): void
+    {
+        $mockServer = [
+            'DOCUMENT_ROOT' => base_path(), // Violates public directory requirement on Nginx
+            'SERVER_SOFTWARE' => 'nginx',
+            'PHP_SAPI' => 'fpm-fcgi',
+        ];
+
+        // 1. Laravel database route blocks and redirects to index
+        $laravelResponse = $this->call('GET', '/install/database', [], [], [], $mockServer);
+        $laravelResponse->assertRedirect(route('install.index'));
+
+        // 2. Native install.php database route blocks and redirects to requirements
+        $nativeResponse = $this->call('GET', '/install.php?step=database', [], [], [], $mockServer);
+        $nativeResponse->assertRedirect('/install.php?step=requirements');
+    }
 }

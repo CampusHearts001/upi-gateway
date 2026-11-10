@@ -12,6 +12,19 @@ use Throwable;
 
 class InstallationManager
 {
+    /**
+     * Keep the SAPI-provided web server values authoritative over Laravel's
+     * request bag, which may contain CLI bootstrap defaults in native mode.
+     */
+    public function serverState(array $server, array $requestServer, string $sapi): array
+    {
+        $isWebRequest = $sapi !== 'cli' || ! empty($server['HTTP_HOST']);
+
+        return $isWebRequest
+            ? array_merge($requestServer, $server)
+            : (! empty($requestServer) ? array_merge($server, $requestServer) : $server);
+    }
+
     private const CLOUDFLARE_PROXY_CIDRS = [
         '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
         '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
