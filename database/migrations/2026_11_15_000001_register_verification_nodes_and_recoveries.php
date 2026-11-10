@@ -22,8 +22,10 @@ return new class extends Migration
                 $table->string('installation_id', 128);
                 $table->string('boot_id', 128);
                 $table->string('instance_id', 64);
-                $table->timestamp('registered_at');
-                $table->timestamp('last_seen_at');
+                // Shared MySQL/MariaDB hosts may reject NOT NULL timestamps
+                // without an explicit default under strict SQL modes.
+                $table->timestamp('registered_at')->useCurrent();
+                $table->timestamp('last_seen_at')->useCurrent();
                 $table->timestamps();
             });
         }
@@ -42,7 +44,7 @@ return new class extends Migration
                 $table->string('operator_identity', 190);
                 $table->text('reason');
                 $table->string('outcome', 32);
-                $table->timestamp('recovered_at');
+                $table->timestamp('recovered_at')->useCurrent();
                 $table->timestamps();
             });
         }
