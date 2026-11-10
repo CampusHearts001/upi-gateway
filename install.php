@@ -845,7 +845,7 @@ if (! $allPassed) {
 
         <?php } elseif ($step === 'done') { ?>
             <h2 style="text-align:center;">Installation complete</h2>
-            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentDiagnosticToken' => $diagnosticToken, 'finalCheck' => true, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
+            <?= view('install.hosting-check', ['deploymentUrl' => $currentUrl, 'deploymentCsrfToken' => $csrfToken, 'deploymentDiagnosticToken' => $diagnosticToken, 'finalCheck' => true, 'serverReady' => $allPassed, 'nativeInstaller' => true])->render() ?>
             <p class="subtitle" style="text-align:center;">Your account and database are ready.</p>
             <a hidden data-deployment-continue aria-disabled="true" data-deployment-href="<?= htmlspecialchars($installerBasePath.'/login', ENT_QUOTES, 'UTF-8') ?>" class="btn" style="margin-top: 1.5rem;">Go to Login &rarr;</a>
         <?php } ?>

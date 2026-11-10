@@ -407,6 +407,6 @@ class InstallerRequirementsOverviewTest extends TestCase
 
         $this->assertStringContainsString('if (!native && routing.installed)', $rendered);
         $this->assertStringContainsString('routing.installed && routing.base_path !== prefix', $rendered);
-        $this->assertStringContainsString('nativeInstaller || routing.runtime !== \'laravel\'', $rendered);
+        $this->assertStringContainsString('routing.runtime !== \'laravel\'', $rendered);
     }
 }

@@ -125,7 +125,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (![403, 404].includes(response.status)) throw new Error('Private-file protection failed for ' + path + '.');
             }
             stage = 'session';
-            const native = nativeInstaller || routing.runtime !== 'laravel' || window.location.pathname.endsWith('install.php');
+            const native = routing.runtime !== 'laravel';
             const endpoint = native ? 'install.php?step=deployment-check' : '__upi_deployment_check';
             const parameters = new URLSearchParams({_token: native ? installerCsrf : routing.csrf_token});
             if (!native) parameters.set('probe', routing.probe);
