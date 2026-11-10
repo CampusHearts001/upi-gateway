@@ -14,6 +14,7 @@ use App\Http\Controllers\PublicStorageController;
 use App\Http\Controllers\SandboxCheckoutController;
 use App\Http\Controllers\SettingsController;
 use App\Http\Middleware\RedirectIfInstalled;
+use App\Support\DeploymentUrl;
 use App\Support\InstallationManager;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -26,13 +27,19 @@ Route::get('/__upi_deployment_check', function (Request $request, InstallationMa
     $request->session()->put('deployment.probe', $probe);
     $request->session()->put('deployment.diagnostic', $diagnosticToken);
 
+    $isInstalled = $installer->isInstalled();
+    $basePath = $isInstalled
+        ? rtrim((string) parse_url(config('app.url'), PHP_URL_PATH), '/')
+        : DeploymentUrl::basePath($request->server->all());
+
     return response()->json([
         'application' => 'upi-gateway', 'routing' => true, 'runtime' => 'laravel',
-        'base_path' => rtrim((string) parse_url(config('app.url'), PHP_URL_PATH), '/'),
+        'base_path' => $basePath,
         'cookie_path' => config('session.path'), 'csrf_token' => csrf_token(), 'probe' => $probe, 'diagnostic_token' => $diagnosticToken,
-        'secure' => $request->isSecure(), 'php_fpm' => PHP_SAPI === 'fpm-fcgi',
-        'php_handler' => $installer->detectPhpHandler(),
-        'login_url' => route('login'), 'dashboard_url' => route('dashboard'), 'installed' => $installer->isInstalled(),
+        'secure' => $request->isSecure(),
+        'php_fpm' => PHP_SAPI === 'fpm-fcgi',
+        'php_handler' => $installer->detectPhpHandler($request->server('PHP_SAPI') ?: $request->server('HTTP_PHP_SAPI')),
+        'login_url' => route('login'), 'dashboard_url' => route('dashboard'), 'installed' => $isInstalled,
     ])->header('Cache-Control', 'no-store');
 });
 Route::post('/__upi_deployment_check', function (Request $request, InstallationManager $installer) {

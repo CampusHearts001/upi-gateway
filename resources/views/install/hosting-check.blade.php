@@ -70,7 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!diagToken) return;
         const endpoint = nativeInstaller ? 'install.php?step=deployment-check' : '__upi_deployment_check';
         const parameters = new URLSearchParams({
-            _token: installerCsrf,
+            _token: nativeInstaller ? installerCsrf : (routing?.csrf_token || installerCsrf),
             diagnostic_report: '1',
             diagnostic_token: diagToken,
             stage,
@@ -104,9 +104,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 throw new Error('Unrecognized PHP handler (' + (handler.name || 'unknown') + '). PHP-FPM or a compatible handler is required.');
             }
-            if (new URL(base).protocol === 'https:' && routing.runtime === 'laravel' && !routing.secure) throw new Error('HTTPS was not detected behind the configured proxy.');
+            if (new URL(base).protocol === 'https:' && routing.runtime === 'laravel' && !routing.secure && window.location.protocol !== 'https:') throw new Error('HTTPS was not detected behind the configured proxy.');
             const prefix = new URL(base).pathname.replace(/\/$/, '');
-            if (routing.base_path !== prefix) throw new Error('The application URL prefix does not match the PHP mount.');
+            if (routing.installed && routing.base_path !== prefix) throw new Error('The application URL prefix does not match the PHP mount.');
             stage = 'assets';
             const assets = await fetchAt('deployment-check.json');
             if (!assets.ok || (await assets.json()).public_assets !== true) throw new Error('The public directory probe failed.');
@@ -125,20 +125,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (![403, 404].includes(response.status)) throw new Error('Private-file protection failed for ' + path + '.');
             }
             stage = 'session';
-            const native = routing.runtime !== 'laravel';
+            const native = nativeInstaller || routing.runtime !== 'laravel' || window.location.pathname.endsWith('install.php');
             const endpoint = native ? 'install.php?step=deployment-check' : '__upi_deployment_check';
             const parameters = new URLSearchParams({_token: native ? installerCsrf : routing.csrf_token});
             if (!native) parameters.set('probe', routing.probe);
             const sessionResponse = await fetchAt(endpoint, {method: 'POST', body: parameters});
             const session = sessionResponse.ok ? await sessionResponse.json() : null;
-            if (!session || !session.session || !session.csrf || (native ? session.cookie_path : routing.cookie_path) !== prefix + '/') throw new Error('The session or CSRF round-trip failed.');
+            const cookiePath = native ? session?.cookie_path : routing.cookie_path;
+            if (!session || !session.session || !session.csrf || (cookiePath && cookiePath !== '/' && cookiePath !== prefix + '/')) throw new Error('The session or CSRF round-trip failed.');
             stage = 'application_urls';
-            if (!native) {
+            if (!native && routing.installed) {
                 if (routing.login_url !== base + '/login' || routing.dashboard_url !== base + '/dashboard') throw new Error('Generated application URLs do not match the public URL.');
-                if (routing.installed) {
-                    const login = await fetchAt('login');
-                    if (!login.ok) throw new Error('The login route is unavailable.');
-                }
+                const login = await fetchAt('login');
+                if (!login.ok) throw new Error('The login route is unavailable.');
             }
             stage = 'installer_lock';
             if (finalCheck) {

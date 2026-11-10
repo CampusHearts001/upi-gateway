@@ -34,7 +34,7 @@ class InstallController extends Controller
 
         $overview = $this->installer->getRequirementsOverview([], $request->server());
         $requirements = $overview['requirements'];
-        $diagnostics = $this->installer->detectEnvironmentDiagnostics($request);
+        $diagnostics = $this->installer->detectEnvironmentDiagnostics($request, $request->server());
         $failedChecks = collect($requirements)
             ->filter(fn (array $check) => ($check['required'] ?? true) && ! $check['pass'])
             ->pluck('name')

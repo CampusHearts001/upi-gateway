@@ -340,4 +340,73 @@ class InstallerRequirementsOverviewTest extends TestCase
         $this->assertStringContainsString('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;', $rendered);
         $this->assertStringContainsString('&lt;b&gt;dangerous&lt;/b&gt;', $rendered);
     }
+
+    public function test_litespeed_sapi_server_readiness_and_progression_allowed(): void
+    {
+        $installer = app(InstallationManager::class);
+        $mockServer = [
+            'SERVER_SOFTWARE' => 'LiteSpeed',
+            'PHP_SAPI' => 'litespeed',
+            'DOCUMENT_ROOT' => public_path(),
+            'HTTP_HOST' => 'pay.example.com',
+            'HTTPS' => 'on',
+        ];
+
+        $readiness = $installer->verifyServerReadiness($mockServer);
+        $this->assertTrue($readiness['ready'], 'Readiness should pass under LiteSpeed when public root matches');
+        $this->assertTrue($readiness['handler']['supported']);
+
+        $overview = $installer->getRequirementsOverview([], $mockServer);
+        $this->assertTrue($overview['allPassed']);
+        $this->assertSame(0, $overview['summary']['failed']);
+
+        // Verify progression to database step is allowed in Laravel flow
+        $response = $this->call('GET', '/install/database', [], [], [], $mockServer);
+        $response->assertOk();
+        $response->assertViewIs('install.database');
+
+        // Verify progression in native install.php flow
+        $nativeResponse = $this->call('GET', '/install.php?step=database', [], [], [], $mockServer);
+        $nativeResponse->assertOk();
+        $this->assertStringContainsString('Database Configuration', $nativeResponse->getContent());
+    }
+
+    public function test_deployment_check_endpoint_supports_uninstalled_and_litespeed_proxy_https(): void
+    {
+        $mockServer = [
+            'SERVER_SOFTWARE' => 'LiteSpeed',
+            'PHP_SAPI' => 'litespeed',
+            'DOCUMENT_ROOT' => public_path(),
+            'HTTP_HOST' => 'pay.example.com',
+            'HTTPS' => 'on',
+            'REQUEST_URI' => '/__upi_deployment_check',
+            'SCRIPT_NAME' => '/index.php',
+        ];
+
+        $response = $this->call('GET', 'https://pay.example.com/__upi_deployment_check', [], [], [], $mockServer);
+        $response->assertOk();
+        $data = $response->json();
+
+        $this->assertSame('upi-gateway', $data['application']);
+        $this->assertTrue($data['routing']);
+        $this->assertFalse($data['installed']);
+        $this->assertTrue($data['secure'], 'LiteSpeed HTTPS indicator should report secure = true');
+        $this->assertTrue($data['php_handler']['supported']);
+        $this->assertSame('LiteSpeed SAPI (LSAPI)', $data['php_handler']['name']);
+        $this->assertSame('', $data['base_path']);
+    }
+
+    public function test_hosting_check_script_guards_application_urls_with_installed_flag(): void
+    {
+        $rendered = view('install.hosting-check', [
+            'deploymentUrl' => 'https://cpanel-user-domain.example',
+            'serverReady' => true,
+            'nativeInstaller' => false,
+            'finalCheck' => false,
+        ])->render();
+
+        $this->assertStringContainsString('if (!native && routing.installed)', $rendered);
+        $this->assertStringContainsString('routing.installed && routing.base_path !== prefix', $rendered);
+        $this->assertStringContainsString('nativeInstaller || routing.runtime !== \'laravel\'', $rendered);
+    }
 }

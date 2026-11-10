@@ -168,7 +168,8 @@ class InstallationManager
         $server = ! empty($server) ? $server : ($_SERVER ?? []);
 
         // 1. Direct Web Server HTTPS indicators (trusted socket)
-        if (! empty($server['HTTPS']) && strtolower((string) $server['HTTPS']) !== 'off') {
+        if ((! empty($server['HTTPS']) && strtolower((string) $server['HTTPS']) !== 'off')
+            || (! empty($server['HTTP_HTTPS']) && strtolower((string) $server['HTTP_HTTPS']) !== 'off')) {
             return true;
         }
 
@@ -712,7 +713,7 @@ class InstallationManager
         }
 
         // 2. System and directory requirements check
-        if (! $this->allRequirementsPassed()) {
+        if (! $this->allRequirementsPassed([], $server)) {
             return [
                 'ready' => false,
                 'reason' => 'requirements',
