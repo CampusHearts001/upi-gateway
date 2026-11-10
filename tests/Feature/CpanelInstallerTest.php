@@ -23,6 +23,7 @@ class CpanelInstallerTest extends TestCase
         @unlink(config('installer.installed_path', storage_path('installed')));
         @unlink(base_path('storage/installed'));
         @unlink(config('installer.setup_token_path', storage_path('installer-setup-token')));
+        @unlink(config('installer.in_progress_path', storage_path('installer-in-progress')));
     }
 
     // ── 1. Requirements & PHP Extensions ─────────────────────────────────────
@@ -1270,6 +1271,276 @@ class CpanelInstallerTest extends TestCase
         $dbResponse = $this->get('/install.php?step=database');
         $dbResponse->assertOk();
         $dbResponse->assertSee('Database');
+    }
+
+    public function test_native_migration_page_csrf_token_survives_get_then_post(): void
+    {
+        $tempDir = sys_get_temp_dir().'/native-migration-session-'.bin2hex(random_bytes(6));
+        mkdir($tempDir, 0700, true);
+        $sessionDir = $tempDir.'/sessions';
+        mkdir($sessionDir, 0700);
+        $scriptPath = $tempDir.'/index.php';
+        $sessionPathFile = $tempDir.'/session-path';
+        $unavailableSavePath = $tempDir.'/missing-session-directory';
+        file_put_contents($sessionPathFile, $unavailableSavePath);
+        $projectRoot = base_path();
+        $script = <<<'PHP'
+<?php
+require getenv('UPI_PROJECT_ROOT').'/app/Support/NativeInstallerSession.php';
+$base = getenv('UPI_PROJECT_ROOT');
+session_save_path(trim(file_get_contents(getenv('UPI_SESSION_PATH_FILE'))));
+if (! App\Support\NativeInstallerSession::start($base, '', false)) {
+    http_response_code(503);
+    exit;
+}
+if (in_array(($_GET['step'] ?? ''), ['database', 'migrate'], true) && ($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
+    $_SESSION['_installer_csrf'] ??= bin2hex(random_bytes(32));
+    $title = ($_GET['step'] ?? '') === 'migrate' ? 'Database Migrations' : 'Database Configuration';
+    echo '<h1>'.$title.'</h1><form method="POST"><input type="hidden" name="_token" value="'.htmlspecialchars($_SESSION['_installer_csrf'], ENT_QUOTES).'">';
+    exit;
+}
+if (($_GET['step'] ?? '') === 'database' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    $expected = (string) ($_SESSION['_installer_csrf'] ?? '');
+    $submitted = (string) ($_POST['_token'] ?? '');
+    if (! App\Support\NativeInstallerSession::csrfMatches($expected, $submitted)) {
+        http_response_code(403);
+        exit;
+    }
+    session_regenerate_id(true);
+    $_SESSION['_installer_setup_authorized'] = true;
+    header('Location: /install.php?step=migrate', true, 302);
+    exit;
+}
+if (($_GET['step'] ?? '') === 'migrate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    $expected = (string) ($_SESSION['_installer_csrf'] ?? '');
+    $submitted = (string) ($_POST['_token'] ?? '');
+    if (! App\Support\NativeInstallerSession::csrfMatches($expected, $submitted)) {
+        http_response_code(403);
+        echo 'Security session expired. Please refresh the page and try again.';
+        exit;
+    }
+    echo 'Migration authorized';
+    exit;
+}
+http_response_code(404);
+PHP;
+        file_put_contents($scriptPath, $script);
+        putenv('UPI_PROJECT_ROOT='.$projectRoot);
+        putenv('UPI_SESSION_PATH_FILE='.$sessionPathFile);
+        [$process, $port] = $this->startPhpServer($tempDir, $scriptPath);
+        $cookieJar = $tempDir.'/cookies.txt';
+
+        try {
+            $get = curl_init("http://127.0.0.1:{$port}/install.php?step=database");
+            curl_setopt_array($get, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_COOKIEJAR => $cookieJar,
+                CURLOPT_COOKIEFILE => $cookieJar,
+                CURLOPT_HEADER => true,
+            ]);
+            $rawGet = (string) curl_exec($get);
+            $headerSize = curl_getinfo($get, CURLINFO_HEADER_SIZE);
+            $html = substr($rawGet, $headerSize);
+            $getHeaders = substr($rawGet, 0, $headerSize);
+            $setCookie = '';
+            if (preg_match('/^Set-Cookie: ([^;]+)/mi', $getHeaders, $cookieMatch)) {
+                $setCookie = $cookieMatch[1];
+            }
+            $this->assertStringStartsWith('upi_setup_', $setCookie);
+            $this->assertSame(200, curl_getinfo($get, CURLINFO_RESPONSE_CODE), $getHeaders);
+            curl_close($get);
+            $this->assertSame(1, preg_match('/name="_token" value="([a-f0-9]{64})"/', $html, $matches), $html);
+            $databaseCsrf = $matches[1];
+
+            $databasePost = curl_init("http://127.0.0.1:{$port}/install.php?step=database");
+            curl_setopt_array($databasePost, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => http_build_query(['_token' => $databaseCsrf]),
+                CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+                CURLOPT_COOKIE => $setCookie,
+            ]);
+            $databaseResponse = (string) curl_exec($databasePost);
+            $databaseStatus = curl_getinfo($databasePost, CURLINFO_RESPONSE_CODE);
+            curl_close($databasePost);
+            $this->assertSame(302, $databaseStatus, $databaseResponse);
+            $this->assertSame(1, preg_match('/^Set-Cookie: ([^;]+)/mi', $databaseResponse, $rotatedCookieMatch), $databaseResponse);
+            $rotatedCookie = $rotatedCookieMatch[1];
+            $this->assertNotSame($setCookie, $rotatedCookie, 'Database POST should rotate the session ID.');
+
+            $migrationGet = curl_init("http://127.0.0.1:{$port}/install.php?step=migrate");
+            curl_setopt_array($migrationGet, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER => true,
+                CURLOPT_COOKIE => $rotatedCookie,
+            ]);
+            $migrationResponse = (string) curl_exec($migrationGet);
+            $migrationHeaderSize = curl_getinfo($migrationGet, CURLINFO_HEADER_SIZE);
+            $migrationHtml = substr($migrationResponse, $migrationHeaderSize);
+            $this->assertSame(200, curl_getinfo($migrationGet, CURLINFO_RESPONSE_CODE), $migrationResponse);
+            curl_close($migrationGet);
+            $this->assertSame(1, preg_match('/name="_token" value="([a-f0-9]{64})"/', $migrationHtml, $migrationMatches), $migrationHtml);
+            $csrf = $migrationMatches[1];
+            $this->assertSame($databaseCsrf, $csrf, 'CSRF token should persist across session ID regeneration.');
+
+            $post = curl_init("http://127.0.0.1:{$port}/install.php?step=migrate");
+            curl_setopt_array($post, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => http_build_query(['_token' => $csrf]),
+                CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+                CURLOPT_COOKIE => $rotatedCookie,
+            ]);
+            $body = (string) curl_exec($post);
+            $postInfo = curl_getinfo($post);
+            $this->assertSame(200, $postInfo['http_code'], $body.' GET headers: '.$getHeaders);
+            $this->assertSame('Migration authorized', $body);
+            curl_close($post);
+
+            foreach ([null, 'invalid-token'] as $token) {
+                $rejected = curl_init("http://127.0.0.1:{$port}/install.php?step=migrate");
+                curl_setopt_array($rejected, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => http_build_query($token === null ? [] : ['_token' => $token]),
+                    CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+                    CURLOPT_COOKIE => $rotatedCookie,
+                ]);
+                $rejectedBody = (string) curl_exec($rejected);
+                $this->assertSame(403, curl_getinfo($rejected, CURLINFO_RESPONSE_CODE));
+                $this->assertStringContainsString('Security session expired', $rejectedBody);
+                curl_close($rejected);
+            }
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+            putenv('UPI_PROJECT_ROOT');
+            putenv('UPI_SESSION_PATH_FILE');
+            foreach (glob($sessionDir.'/*') ?: [] as $sessionFile) {
+                @unlink($sessionFile);
+            }
+            foreach ([$setCookie ?? '', $rotatedCookie ?? ''] as $sessionCookie) {
+                $sessionId = substr($sessionCookie, strpos($sessionCookie, '=') + 1);
+                if ($sessionId !== '' && preg_match('/^[A-Za-z0-9,-]+$/', $sessionId)) {
+                    @unlink(base_path('storage/framework/sessions/sess_'.$sessionId));
+                }
+            }
+            @unlink($cookieJar);
+            @unlink($scriptPath);
+            @unlink($sessionPathFile);
+            @rmdir($sessionDir);
+            @rmdir($tempDir);
+        }
+    }
+
+    public function test_saved_database_configuration_can_resume_migration_after_session_state_is_lost(): void
+    {
+        $this->removeInstallationMarker();
+
+        $originalPaths = [
+            'installer.env_path' => config('installer.env_path'),
+            'installer.in_progress_path' => config('installer.in_progress_path'),
+            'installer.setup_lock_path' => config('installer.setup_lock_path'),
+            'installer.setup_token_path' => config('installer.setup_token_path'),
+        ];
+        $suffix = bin2hex(random_bytes(6));
+        $envPath = sys_get_temp_dir().'/gateway-migration-env-'.$suffix;
+        $paths = [
+            'installer.env_path' => $envPath,
+            'installer.in_progress_path' => storage_path('framework/testing/migration-progress-'.$suffix),
+            'installer.setup_lock_path' => storage_path('framework/testing/migration-lock-'.$suffix),
+            'installer.setup_token_path' => storage_path('framework/testing/migration-token-'.$suffix),
+        ];
+        config($paths);
+
+        $database = [
+            'db_connection' => 'mysql',
+            'db_host' => '127.0.0.1',
+            'db_port' => 3306,
+            'db_database' => 'cpanel_gateway',
+            'db_username' => 'cpanel_user',
+            'db_password' => 'private-test-password',
+        ];
+
+        try {
+            $manager = app(InstallationManager::class);
+            $manager->ensureSetupState();
+            $manager->writeEnvironment($database + [
+                'app_name' => 'Gateway',
+                'app_url' => 'https://gateway.example.com',
+            ]);
+            $this->assertFileExists($envPath);
+            $this->assertSame(0600, fileperms($envPath) & 0777);
+
+            $this->partialMock(InstallationManager::class, function ($mock) use ($database) {
+                $mock->shouldReceive('isInstalled')->andReturn(false);
+                $mock->shouldReceive('testDatabaseConnection')->once()->with($database);
+            });
+            $_SESSION = [];
+
+            $response = $this->get('/install.php?step=migrate');
+
+            $response->assertOk()->assertSee('Database Migrations');
+            $this->assertTrue($_SESSION['_installer_setup_authorized'] ?? false);
+            $this->assertTrue($_SESSION['_installer_db_configured'] ?? false);
+
+        } finally {
+            @unlink($envPath);
+            @unlink($paths['installer.in_progress_path']);
+            @unlink($paths['installer.setup_lock_path']);
+            @unlink($paths['installer.setup_token_path']);
+            config($originalPaths);
+        }
+    }
+
+    public function test_migration_stays_blocked_when_saved_database_configuration_is_missing_or_unusable(): void
+    {
+        $this->removeInstallationMarker();
+
+        $originalPaths = [
+            'installer.env_path' => config('installer.env_path'),
+            'installer.in_progress_path' => config('installer.in_progress_path'),
+            'installer.setup_lock_path' => config('installer.setup_lock_path'),
+            'installer.setup_token_path' => config('installer.setup_token_path'),
+        ];
+        $suffix = bin2hex(random_bytes(6));
+        $envPath = sys_get_temp_dir().'/gateway-invalid-migration-env-'.$suffix;
+        $paths = [
+            'installer.env_path' => $envPath,
+            'installer.in_progress_path' => storage_path('framework/testing/invalid-migration-progress-'.$suffix),
+            'installer.setup_lock_path' => storage_path('framework/testing/invalid-migration-lock-'.$suffix),
+            'installer.setup_token_path' => storage_path('framework/testing/invalid-migration-token-'.$suffix),
+        ];
+        config($paths);
+
+        try {
+            $this->partialMock(InstallationManager::class, function ($mock) {
+                $mock->shouldReceive('isInstalled')->andReturn(false);
+                $mock->shouldReceive('testDatabaseConnection')->once()->andThrow(new RuntimeException('Database unavailable.'));
+            });
+            $_SESSION = [];
+            $this->get('/install.php?step=migrate')->assertRedirect('/install.php?step=database');
+
+            file_put_contents($envPath, implode("\n", [
+                'DB_CONNECTION=mysql',
+                'DB_HOST=127.0.0.1',
+                'DB_PORT=3306',
+                'DB_DATABASE=cpanel_gateway',
+                'DB_USERNAME=cpanel_user',
+                'DB_PASSWORD=private-test-password',
+                '',
+            ]));
+            chmod($envPath, 0600);
+            $_SESSION = [];
+            $this->get('/install.php?step=migrate')->assertRedirect('/install.php?step=database');
+        } finally {
+            @unlink($envPath);
+            @unlink($paths['installer.in_progress_path']);
+            @unlink($paths['installer.setup_lock_path']);
+            @unlink($paths['installer.setup_token_path']);
+            config($originalPaths);
+        }
     }
 
     // ── 16. HTTP/HTTPS Installation & Remote DB Validation (B2 & B3) ────────

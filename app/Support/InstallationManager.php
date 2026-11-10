@@ -3,6 +3,7 @@
 namespace App\Support;
 
 use App\Models\User;
+use Dotenv\Dotenv;
 use Illuminate\Encryption\Encrypter;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -1442,6 +1443,57 @@ class InstallationManager
             ]);
 
             throw $e;
+        }
+    }
+
+    public function verifySavedDatabaseConfiguration(): bool
+    {
+        $envPath = $this->envPath();
+        if (! is_file($envPath) || is_link($envPath) || ! $this->hasIncompleteSetup()) {
+            return false;
+        }
+        if (! $this->privateFileIsValid($envPath)) {
+            @chmod($envPath, 0600);
+            clearstatcache(true, $envPath);
+            if (! $this->privateFileIsValid($envPath)) {
+                return false;
+            }
+        }
+
+        try {
+            $environment = Dotenv::parse((string) file_get_contents($envPath));
+        } catch (Throwable) {
+            return false;
+        }
+
+        $host = trim((string) ($environment['DB_HOST'] ?? ''));
+        $database = trim((string) ($environment['DB_DATABASE'] ?? ''));
+        $username = trim((string) ($environment['DB_USERNAME'] ?? ''));
+        $port = filter_var($environment['DB_PORT'] ?? null, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 1, 'max_range' => 65535],
+        ]);
+
+        if (($environment['DB_CONNECTION'] ?? '') !== 'mysql'
+            || $host === ''
+            || $database === ''
+            || $username === ''
+            || $port === false) {
+            return false;
+        }
+
+        try {
+            $this->testDatabaseConnection([
+                'db_connection' => 'mysql',
+                'db_host' => $host,
+                'db_port' => $port,
+                'db_database' => $database,
+                'db_username' => $username,
+                'db_password' => (string) ($environment['DB_PASSWORD'] ?? ''),
+            ]);
+
+            return true;
+        } catch (Throwable) {
+            return false;
         }
     }
 

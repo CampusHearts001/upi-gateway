@@ -318,6 +318,7 @@ $app = function_exists('app') && app()->bound(Kernel::class)
     : (require $baseDir.'/bootstrap/app.php');
 $kernel = $app->make(Kernel::class);
 $kernel->bootstrap();
+NativeInstallerSession::logRequestState();
 $installer = app(InstallationManager::class);
 try {
     $installer->ensureSetupState();
@@ -372,7 +373,8 @@ $serverState = $installer->serverState($_SERVER, $requestServer, PHP_SAPI);
 // Validate CSRF token on POST
 if ($method === 'POST') {
     $submittedToken = $_POST['_token'] ?? (function_exists('request') ? request()->input('_token', '') : '');
-    if (! hash_equals($csrfToken, (string) $submittedToken)) {
+    if (! NativeInstallerSession::csrfMatches((string) $csrfToken, (string) $submittedToken)) {
+        NativeInstallerSession::logCsrfMismatch((string) $csrfToken, (string) $submittedToken);
         http_response_code(403);
         $error = 'Security session expired. Please refresh the page and try again.';
         $step = $_GET['step'] ?? (function_exists('request') ? request()->query('step', 'requirements') : 'requirements');
@@ -468,7 +470,13 @@ if (! $error && $step === 'database') {
 }
 
 if (in_array($step, ['migrate', 'admin'], true) && empty($_SESSION['_installer_setup_authorized'])) {
-    if ($method === 'POST') {
+    // A verified .env database configuration survives a lost PHP session. Do
+    // not restore setup authorization unless the persisted credentials still
+    // connect successfully to the configured local database.
+    if ($installer->verifySavedDatabaseConfiguration()) {
+        $_SESSION['_installer_db_configured'] = true;
+        $_SESSION['_installer_setup_authorized'] = true;
+    } elseif ($method === 'POST') {
         http_response_code(403);
         $error = 'Database setup must be completed before proceeding.';
     } else {
@@ -566,10 +574,29 @@ if ($method === 'POST' && ! $error) {
 
                 return;
             } else {
+                $migrationOutput = trim(preg_replace('/\s+/', ' ', Artisan::output()));
+                $databasePassword = (string) config('database.connections.mysql.password', '');
+                if ($databasePassword !== '') {
+                    $migrationOutput = str_replace($databasePassword, '[redacted]', $migrationOutput);
+                }
+                error_log('[UPI Gateway installer] Database migration returned a non-zero exit code: '.json_encode([
+                    'exit_code' => $exitCode,
+                    'output' => mb_substr($migrationOutput, 0, 1500),
+                ], JSON_UNESCAPED_SLASHES));
                 $error = 'Database migration did not complete successfully. Check server logs.';
             }
-        } catch (Throwable) {
-            $error = 'Migration error occurred. Ensure your database user has ALL PRIVILEGES in cPanel.';
+        } catch (Throwable $e) {
+            $migrationMessage = trim(preg_replace('/\s+/', ' ', $e->getMessage()));
+            $databasePassword = (string) config('database.connections.mysql.password', '');
+            if ($databasePassword !== '') {
+                $migrationMessage = str_replace($databasePassword, '[redacted]', $migrationMessage);
+            }
+            error_log('[UPI Gateway installer] Database migration threw an exception: '.json_encode([
+                'exception' => get_class($e),
+                'code' => $e->getCode(),
+                'message' => mb_substr($migrationMessage, 0, 1500),
+            ], JSON_UNESCAPED_SLASHES));
+            $error = 'Database migration failed. Check the server error log for details before retrying.';
         }
     } elseif ($step === 'admin') {
         $adminName = trim($_POST['name'] ?? '');
