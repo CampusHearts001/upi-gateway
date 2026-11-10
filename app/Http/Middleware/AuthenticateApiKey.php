@@ -22,7 +22,7 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class AuthenticateApiKey
 {
-    public function handle(Request $request, Closure $next): Response
+    public function handle(Request $request, Closure $next, string $limitScope = 'default'): Response
     {
         $requestId = (string) Str::uuid();
         $request->headers->set('X-Request-Id', $requestId);
@@ -65,10 +65,17 @@ class AuthenticateApiKey
         $request->attributes->set('payment_environment', $environment);
 
         // ── Per-key throttle ──────────────────────────────────────────────────
-        $keyLimit = (int) config('gateway.api_key_rate_limit', 120);
-        $keyBucket = $environment === Order::LIVE
-            ? 'api-key:'.$merchant->id
-            : 'api-key:sandbox:'.$merchant->id;
+        $orderCreate = $limitScope === 'order_create';
+        $configuredKeyLimit = config(
+            $orderCreate ? 'gateway.order_create_api_key_rate_limit' : 'gateway.api_key_rate_limit',
+            $orderCreate ? 1000 : 120
+        );
+        $keyLimit = filter_var($configuredKeyLimit, FILTER_VALIDATE_INT);
+        if (! is_int($keyLimit) || $keyLimit < 1) {
+            $keyLimit = $orderCreate ? 1000 : 120;
+        }
+        $keyBucket = ($orderCreate ? 'api-order-create-key:' : 'api-key:')
+            .($environment === Order::LIVE ? '' : 'sandbox:').$merchant->id;
 
         if (RateLimiter::tooManyAttempts($keyBucket, $keyLimit)) {
             return response()->json(['message' => 'Rate limit exceeded for this API key.'], 429)

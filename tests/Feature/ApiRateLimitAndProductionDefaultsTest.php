@@ -151,7 +151,7 @@ class ApiRateLimitAndProductionDefaultsTest extends TestCase
     {
         config([
             'gateway.api_failed_auth_ip_rate_limit' => 5,
-            'gateway.api_key_rate_limit' => 2,
+            'gateway.order_create_api_key_rate_limit' => 2,
         ]);
         $clientIp = '198.51.100.1';
 
@@ -182,6 +182,80 @@ class ApiRateLimitAndProductionDefaultsTest extends TestCase
             ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'CLI-3'])
             ->assertStatus(429)
             ->assertJson(['message' => 'Rate limit exceeded for this API key.']);
+    }
+
+    public function test_order_create_uses_its_configured_per_key_limit_and_returns_retry_headers(): void
+    {
+        config(['gateway.order_create_api_key_rate_limit' => 2]);
+        $headers = ['X-Api-Key' => $this->merchant->api_key, 'X-Api-Secret' => $this->merchant->api_secret];
+
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders($headers)
+            ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'FLASH-1'])->assertCreated();
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders($headers)
+            ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'FLASH-2'])->assertCreated();
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders($headers)
+            ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'FLASH-3'])
+            ->assertTooManyRequests()->assertHeader('Retry-After')->assertHeader('X-RateLimit-Limit', '2');
+    }
+
+    public function test_order_create_default_limit_is_one_thousand_per_minute(): void
+    {
+        $this->assertSame(1000, config('gateway.order_create_api_key_rate_limit'));
+    }
+
+    public function test_non_order_api_endpoints_keep_the_existing_per_key_limit(): void
+    {
+        config([
+            'gateway.api_key_rate_limit' => 1,
+            'gateway.order_create_api_key_rate_limit' => 2,
+        ]);
+        $headers = ['X-Api-Key' => $this->merchant->api_key, 'X-Api-Secret' => $this->merchant->api_secret];
+
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders($headers)
+            ->getJson('/api/v1/accounts')->assertOk();
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders($headers)
+            ->getJson('/api/v1/accounts')->assertTooManyRequests()->assertHeader('X-RateLimit-Limit', '1');
+
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders($headers)
+            ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'SEPARATE-BUCKET'])->assertCreated();
+    }
+
+    public function test_per_ip_limit_still_applies_to_order_creation(): void
+    {
+        config(['gateway.order_create_api_key_rate_limit' => 10, 'gateway.api_ip_rate_limit' => 1]);
+        $headers = ['X-Api-Key' => $this->merchant->api_key, 'X-Api-Secret' => $this->merchant->api_secret];
+        $ip = '198.51.100.1';
+
+        $this->withServerVariables(['REMOTE_ADDR' => $ip])->withHeaders($headers)
+            ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'IP-ONE'])->assertCreated();
+        $this->withServerVariables(['REMOTE_ADDR' => $ip])->withHeaders($headers)
+            ->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'IP-TWO'])
+            ->assertTooManyRequests()->assertHeader('Retry-After');
+    }
+
+    public function test_each_merchant_has_an_independent_order_create_bucket(): void
+    {
+        config(['gateway.order_create_api_key_rate_limit' => 1]);
+        $other = User::create(['name' => 'Other Merchant', 'email' => 'other@example.com', 'password' => 'password123']);
+        $other->regenerateApiCredentials();
+        $other->paymentAccounts()->create([
+            'provider' => 'manual', 'label' => 'Other', 'upi_id' => 'other@upi', 'payee_name' => 'Other',
+        ]);
+
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders([
+            'X-Api-Key' => $this->merchant->api_key, 'X-Api-Secret' => $this->merchant->api_secret,
+        ])->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'M-ONE'])->assertCreated();
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders([
+            'X-Api-Key' => $other->api_key, 'X-Api-Secret' => $other->api_secret,
+        ])->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'OTHER-ONE'])->assertCreated();
+    }
+
+    public function test_invalid_order_create_limit_uses_safe_default_instead_of_disabling_throttle(): void
+    {
+        config(['gateway.order_create_api_key_rate_limit' => 'invalid']);
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])->withHeaders([
+            'X-Api-Key' => $this->merchant->api_key, 'X-Api-Secret' => $this->merchant->api_secret,
+        ])->postJson('/api/v1/orders', ['amount' => 100, 'client_order_id' => 'SAFE-DEFAULT'])->assertCreated();
     }
 
     public function test_installer_generates_production_safe_environment_defaults(): void

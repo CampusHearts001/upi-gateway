@@ -1,5 +1,10 @@
 <?php
 
+$configuredOrderCreateApiKeyRateLimit = filter_var(
+    env('GATEWAY_ORDER_CREATE_API_KEY_RATE_LIMIT', 1000),
+    FILTER_VALIDATE_INT
+);
+
 return [
     // Minutes a payment link stays valid before the order expires.
     'order_expiry_minutes' => (int) env('GATEWAY_ORDER_EXPIRY_MINUTES', 15),
@@ -87,6 +92,11 @@ return [
     // ── API rate limiting ─────────────────────────────────────────────────────
     // Per-API-key request limit per minute. Lower this in tests via config([...]).
     'api_key_rate_limit' => (int) env('GATEWAY_API_KEY_RATE_LIMIT', 120),
+    // Order creation has its own higher per-merchant limit for flash-sale traffic.
+    // Invalid or non-positive values fall back to the safe configured default.
+    'order_create_api_key_rate_limit' => is_int($configuredOrderCreateApiKeyRateLimit) && $configuredOrderCreateApiKeyRateLimit > 0
+        ? $configuredOrderCreateApiKeyRateLimit
+        : 1000,
 
     // Per-IP request limit per minute across all API keys.
     'api_ip_rate_limit' => (int) env('GATEWAY_API_IP_RATE_LIMIT', 600),

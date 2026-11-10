@@ -330,12 +330,12 @@ class SecurityHardeningTest extends TestCase
     public function test_api_per_key_throttle_returns_429_after_120_requests(): void
     {
         // Restore real rate limit for this test only.
-        config(['gateway.api_key_rate_limit' => 120]);
+        config(['gateway.order_create_api_key_rate_limit' => 120]);
 
         $merchant = $this->merchant();
 
         // RateLimiter key matches what AuthenticateApiKey middleware uses.
-        $limiterKey = 'api-key:'.$merchant->id;
+        $limiterKey = 'api-order-create-key:'.$merchant->id;
 
         // Exhaust the 120-request allowance.
         for ($i = 0; $i < 120; $i++) {
@@ -351,7 +351,7 @@ class SecurityHardeningTest extends TestCase
     public function test_api_throttle_on_one_key_does_not_affect_another_key(): void
     {
         // Restore real rate limit for this test only.
-        config(['gateway.api_key_rate_limit' => 120]);
+        config(['gateway.order_create_api_key_rate_limit' => 120]);
 
         $merchant1 = $this->merchant();
         $merchant2 = User::create([
@@ -366,7 +366,7 @@ class SecurityHardeningTest extends TestCase
         $merchant2->update(['redirect_domains' => ['shop.test']]);
 
         // Exhaust merchant1's allowance.
-        $limiterKey = 'api-key:'.$merchant1->id;
+        $limiterKey = 'api-order-create-key:'.$merchant1->id;
         for ($i = 0; $i < 120; $i++) {
             RateLimiter::hit($limiterKey, 60);
         }
