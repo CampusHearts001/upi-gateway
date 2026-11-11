@@ -11,7 +11,7 @@ COPY . .
 RUN npm run build
 
 
-# Stage 2: Install Laravel dependencies
+# Stage 2: Install Composer dependencies
 FROM composer:2 AS vendor
 
 WORKDIR /app
@@ -26,8 +26,8 @@ RUN composer install \
     --no-scripts
 
 
-# Stage 3: PHP and Apache
-FROM php:8.3-apache
+# Stage 3: PHP without Apache
+FROM php:8.3-cli
 
 RUN apt-get update && apt-get install -y \
     libicu-dev \
@@ -45,20 +45,6 @@ RUN apt-get update && apt-get install -y \
        opcache \
     && rm -rf /var/lib/apt/lists/*
 
-
-# Fix Apache MPM conflict
-# PHP Apache requires prefork.
-RUN set -eux; \
-    find /etc/apache2/mods-enabled \
-      -maxdepth 1 \
-      -name 'mpm_*' \
-      -delete; \
-    a2enmod mpm_prefork rewrite headers; \
-    echo "Checking Apache MPM configuration"; \
-    apache2ctl configtest
-
-
-# Laravel application
 WORKDIR /var/www/html
 
 COPY . .
@@ -66,24 +52,6 @@ COPY . .
 COPY --from=vendor /app/vendor ./vendor
 COPY --from=assets /app/public/build ./public/build
 
-
-# Serve Laravel from public/
-RUN sed -ri \
-    's#DocumentRoot /var/www/html#DocumentRoot /var/www/html/public#g' \
-    /etc/apache2/sites-available/000-default.conf
-
-
-# Allow Laravel routing
-RUN printf '%s\n' \
-    '<Directory /var/www/html/public>' \
-    '    AllowOverride All' \
-    '    Require all granted' \
-    '</Directory>' \
-    > /etc/apache2/conf-available/laravel.conf \
-    && a2enconf laravel
-
-
-# Writable Laravel directories
 RUN mkdir -p \
     storage/framework/cache/data \
     storage/framework/sessions \
@@ -93,11 +61,9 @@ RUN mkdir -p \
     && chown -R www-data:www-data storage bootstrap/cache \
     && chmod -R ug+rwX storage bootstrap/cache
 
+# Railway supplies the PORT environment variable
+ENV PORT=8080
 
-# Final Apache configuration validation
-RUN apache2ctl configtest
+EXPOSE 8080
 
-
-EXPOSE 80
-
-CMD ["apache2-foreground"]
+CMD ["sh", "-c", "php -S 0.0.0.0:${PORT:-8080} -t public public/index.php"]
