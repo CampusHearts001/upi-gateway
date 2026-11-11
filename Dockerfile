@@ -3,20 +3,30 @@
 FROM node:22-alpine AS assets
 
 WORKDIR /app
+
 COPY package*.json ./
 RUN npm ci
+
 COPY . .
 RUN npm run build
 
-# Stage 2: Install PHP dependencies
+
+# Stage 2: Install Laravel dependencies
 FROM composer:2 AS vendor
 
 WORKDIR /app
-COPY composer.json composer.lock ./
-RUN composer install --no-dev --no-interaction \
-    --prefer-dist --optimize-autoloader --no-scripts
 
-# Stage 3: Laravel + Apache
+COPY composer.json composer.lock ./
+
+RUN composer install \
+    --no-dev \
+    --no-interaction \
+    --prefer-dist \
+    --optimize-autoloader \
+    --no-scripts
+
+
+# Stage 3: PHP and Apache
 FROM php:8.3-apache
 
 RUN apt-get update && apt-get install -y \
@@ -27,27 +37,43 @@ RUN apt-get update && apt-get install -y \
     unzip \
     git \
     && docker-php-ext-install \
-       pdo_mysql mbstring intl zip bcmath opcache \
+       pdo_mysql \
+       mbstring \
+       intl \
+       zip \
+       bcmath \
+       opcache \
     && rm -rf /var/lib/apt/lists/*
 
-# Enable exactly one Apache MPM
-RUN rm -f /etc/apache2/mods-enabled/mpm_*.load \
-          /etc/apache2/mods-enabled/mpm_*.conf \
-    && a2enmod mpm_prefork rewrite headers \
-    && apache2ctl configtest
 
+# Fix Apache MPM conflict
+# PHP Apache requires prefork.
+RUN set -eux; \
+    find /etc/apache2/mods-enabled \
+      -maxdepth 1 \
+      -name 'mpm_*' \
+      -delete; \
+    a2enmod mpm_prefork rewrite headers; \
+    echo "Checking Apache MPM configuration"; \
+    apache2ctl configtest
+
+
+# Laravel application
 WORKDIR /var/www/html
 
 COPY . .
+
 COPY --from=vendor /app/vendor ./vendor
 COPY --from=assets /app/public/build ./public/build
 
-# Serve Laravel from the public directory
+
+# Serve Laravel from public/
 RUN sed -ri \
-    's!/var/www/html!/var/www/html/public!g' \
+    's#DocumentRoot /var/www/html#DocumentRoot /var/www/html/public#g' \
     /etc/apache2/sites-available/000-default.conf
 
-# Allow Laravel .htaccess rewrite rules
+
+# Allow Laravel routing
 RUN printf '%s\n' \
     '<Directory /var/www/html/public>' \
     '    AllowOverride All' \
@@ -56,7 +82,8 @@ RUN printf '%s\n' \
     > /etc/apache2/conf-available/laravel.conf \
     && a2enconf laravel
 
-# Create Laravel writable directories
+
+# Writable Laravel directories
 RUN mkdir -p \
     storage/framework/cache/data \
     storage/framework/sessions \
@@ -66,8 +93,10 @@ RUN mkdir -p \
     && chown -R www-data:www-data storage bootstrap/cache \
     && chmod -R ug+rwX storage bootstrap/cache
 
-# Validate Apache configuration again
+
+# Final Apache configuration validation
 RUN apache2ctl configtest
+
 
 EXPOSE 80
 
