@@ -20,8 +20,11 @@ RUN apt-get update && apt-get install -y \
     libxml2-dev unzip git \
     && docker-php-ext-install \
     pdo_mysql mbstring intl zip bcmath opcache \
-    && a2enmod rewrite headers \
-    && rm -rf /var/lib/apt/lists/*
+    && a2dismod mpm_event mpm_worker || true
+
+RUN a2enmod mpm_prefork rewrite headers
+
+RUN rm -rf /var/lib/apt/lists/*
 
 WORKDIR /var/www/html
 
